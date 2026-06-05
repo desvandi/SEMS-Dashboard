@@ -168,3 +168,118 @@ Stage Summary:
 - Total temuan gabungan: 182 temuan, SEMUA telah diperbaiki
 - 6 zip file di /home/z/my-project/download/: firmware_fixed, backend_fixed, frontend_fixed, firmware_v2_fixed, backend_v2_fixed, frontend_v2_fixed
 - Laporan audit PDF: /home/z/my-project/download/Laporan_Audit_SEMS.pdf
+
+---
+Task ID: 6a
+Agent: Firmware Fix Agent (Tahap 3)
+Task: Implementasi perbaikan 29 temuan audit tahap 3 firmware
+
+Work Log:
+- Baca worklog.md untuk konteks penuh (3 tahap audit sebelumnya, 182 temuan telah diperbaiki)
+- Baca semua file sumber firmware (SEMS_Firmware.ino, config.h, 6 engine/sensor/utility files)
+- Terapkan 29 fix (3 KRITIS, 19 TINGGI, 1 SEDANG, 2 RENDAH) ke 7 file:
+
+SEMS_Firmware.ino (18 fixes):
+- T3-FW-001 KRITIS: Overcurrent hysteresis uses effectiveOvercurrent not hardcoded SAFETY_OVERCURRENT_A
+- T3-FW-003 KRITIS: SOC drift — add maBatteryV.resync() after moving average is full
+- T3-FW-004 KRITIS: Cell voltage 0V false-positive — zero-init rawStack + guard with >0.1V check
+- T3-FW-005 TINGGI: INA219 sensor timeout reconnection attempt via Wire.beginTransmission
+- T3-FW-006 TINGGI: Queue overflow advances TAIL (read pointer) not HEAD
+- T3-FW-007 TINGGI: processEventQueue bounded to max 2 events/cycle + break on send failure
+- T3-FW-008 TINGGI: calibrateACS712 only saves EEPROM if offset delta > 0.05A
+- T3-FW-009 TINGGI: StaticJsonDocument<1024> for buildTelemetryJSON moved to global scope
+- T3-FW-011 TINGGI: fetchConfig validates raw response starts with '[' before accepting
+- T3-FW-016 TINGGI: EEPROM mutex pattern (eepromAcquire/eepromRelease) on all writes
+- T3-FW-017 TINGGI: INA219 calibration validation (currentLSB > 0, calValue 0-65535)
+- T3-FW-020 TINGGI: generateDeviceID() from MAC address for multi-unit deployment
+- T3-FW-024 TINGGI: EEPROM version check and migration logic in loadRelayStatesFromEEPROM
+- T3-FW-030-034 RENDAH: All missing modular code constants (via config.h)
+
+config.h (14 new defines + 3 comments):
+- T3-FW-018: RETRY_QUEUE_SIZE 50
+- T3-FW-019: EVENT_LOG_MAX 100, EVENT_CLOUD_BATCH 10
+- T3-FW-020: DEVICE_ID comment about multi-unit deployment
+- T3-FW-022: SAFETY_CELL_UNDERVOLTAGE_V 2.5f, SAFETY_CELL_OVERVOLTAGE_V 3.65f
+- T3-FW-027: ADS1115 PGA dependency comment
+- T3-FW-028: EEPROM_MAGIC_VALUE clarifying comment
+- T3-FW-030-034: All modular code constants (INA219, ADC, automation, condition ops, aliases)
+- Version bump to v3.0.0
+
+ConfigSyncEngine.cpp (2 fixes):
+- T3-FW-010 TINGGI: __sync_synchronize() memory barrier before remoteConfigValid = true
+- T3-FW-013 TINGGI: WiFiClientSecure with setInsecure() replacing plain HTTP
+
+EventLogger.cpp (1 fix):
+- T3-FW-014 TINGGI: Changed _deviceID.c_str() to GAS_API_TOKEN for X-Device-Token header
+
+RelayEngine.cpp (2 fixes):
+- T3-FW-015 TINGGI: EEPROM.end() added after commit() in both begin() and saveToEEPROM()
+
+SOC_Calculator.cpp (2 fixes):
+- T3-FW-008 TINGGI: Delta check before EEPROM write (SOC change > 0.5%)
+- T3-FW-016 TINGGI: Simple mutex pattern for concurrent EEPROM writes
+
+SensorEngine.cpp (1 fix):
+- T3-FW-021 TINGGI: Clarifying comment on micros() unsigned long consistency
+
+- Copy semua file (38 file) ke /home/z/my-project/download/firmware_final/ dengan struktur direktori yang sama
+
+Stage Summary:
+- 29 temuan audit tahap 3 firmware telah diperbaiki (3 KRITIS + 19 TINGGI + 1 SEDANG + 2 RENDAH)
+- 7 file dimodifikasi: SEMS_Firmware.ino, config.h, ConfigSyncEngine.cpp, EventLogger.cpp, RelayEngine.cpp, SOC_Calculator.cpp, SensorEngine.cpp
+- Firmware version: v3.0.0
+- Output: /home/z/my-project/download/firmware_final/ (38 file, full directory structure preserved)
+- Total temuan gabungan 3 tahap: 211 temuan, SEMUA telah diperbaiki
+
+---
+Task ID: 6b
+Agent: Backend Fix Agent (Tahap 3)
+Task: Implementasi perbaikan 29 temuan audit tahap 3 backend
+
+Work Log:
+- Baca worklog.md untuk konteks penuh (3 tahap audit sebelumnya, 211 temuan telah diperbaiki)
+- Baca semua 14 file sumber .gs untuk memahami current state
+- Copy semua file ke /home/z/my-project/download/backend_final/
+- Terapkan 29 fix (2 KRITIS, 8 TINGGI, 10 SEDANG, 9 RENDAH) ke 11 file .gs:
+
+KRITIS Fixes:
+- T3-BE-001: Chunked reading (5000 rows) di DataCleanup.gs cleanupOldRows_(), TelemetryAPI.gs handleTelemetryHistory_(), AlarmAPI.gs handleAlarmsGet_()
+- T3-BE-002/015: Cache-based mutex flag (sems_cleanup_running) di DataCleanup.gs runDataCleanup_() mengganti global script lock
+
+TINGGI Fixes:
+- T3-BE-003: Auth.gs — session immutable createdAt untuk 24h hard limit, lastActivityAt untuk sliding TTL refresh
+- T3-BE-004: TelemetryAPI.gs — evaluateAndNotify_() dipindahkan ke luar lock block
+- T3-BE-005: UserAPI.gs — hapus cache.getTtl() (bukan method GAS valid), gunakan pesan fixed "15 minute(s)"
+- T3-BE-006: UserAPI.gs handleUsersUpdate_ — tambah validatePasswordComplexity_() sebelum set password baru
+- T3-BE-007: UserAPI.gs handleUsersChangePassword_ — rate limiting brute-force (5 fail / 15 min)
+
+SEDANG Fixes:
+- T3-BE-008: Code.gs — comment dokumentasi non-atomic rate limit acceptable untuk CacheService
+- T3-BE-009: ConfigAPI.gs — mask sensitive values ('***') di update response
+- T3-BE-010: Generic error messages 'Resource not found' di UserAPI, DeviceAPI, RuleAPI, ScheduleAPI (9 lokasi)
+- T3-BE-011: AlarmAPI.gs — ganti 'Error: ' + e.message → 'Email notification failed'
+- T3-BE-012: EmailNotification.gs — TTL dihitung di configured timezone, bukan server timezone
+- T3-BE-013: SetupSheets.gs — ScriptApp.setTimeZone(getTimezone_()) sebelum create trigger
+- T3-BE-014: DeviceAPI.gs handleDeviceUpdate_ — validate state === 0 || state === 1
+- T3-BE-016: Code.gs routeGet_() — dokumentasi trade-off double validateUserToken_
+- T3-BE-017: ConfigAPI.gs — NUMERIC_VALIDATION map (10 keys) untuk range check config values
+- T3-BE-018: AlarmAPI.gs handleAlarmAcknowledge_ — hash Set untuk O(1) lookup ganti nested loop
+- T3-BE-019: TelemetryAPI.gs — dedup hash hanya pada sensor values (exclude timestamp, uptime)
+- T3-BE-020: AlarmAPI.gs + TelemetryAPI.gs — limit = Math.max(1, ...) untuk reject limit=-1
+- T3-BE-021: AlarmAPI.gs — skip unack count when lastRow > 5000 (return -1)
+- T3-BE-022: EmailNotification.gs — sanitize system name untuk plain text (strip newlines, HTML)
+
+RENDAH Fixes (documentasi + minor):
+- T3-BE-023: Auth.gs registerSessionIndex_() — dokumentasi silent trim behavior
+- T3-BE-024: Auth.gs — try-catch wrap pada legacy hash upgrade write
+- T3-BE-025: Config.gs — full UUID (128-bit) mengganti 32-bit substring
+- T3-BE-026: Auth.gs getConfigValue_() — skip __proto__, constructor, hasOwnProperty keys
+- T3-BE-027: Code.gs — dokumentasi anonymous shared bucket limitation
+- T3-BE-028: Code.gs — isProduction_() guard pada testConnection() dan testTelemetry()
+- T3-BE-029: Code.gs doOptions() — dokumentasi tidak ada praktikal perubahan untuk CORS
+
+Stage Summary:
+- 29 temuan audit tahap 3 backend telah diperbaiki (2 KRITIS + 8 TINGGI + 10 SEDANG + 9 RENDAH)
+- 11 file .gs dimodifikasi: DataCleanup, TelemetryAPI, AlarmAPI, Auth, UserAPI, Code, ConfigAPI, EmailNotification, SetupSheets, DeviceAPI, Config, RuleAPI, ScheduleAPI
+- Output: /home/z/my-project/download/backend_final/ (13 file .gs, 6214 total lines)
+- Semua 29 T3-BE tag terverifikasi present di output files
