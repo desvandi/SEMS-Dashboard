@@ -119,6 +119,12 @@ function cleanupOldRows_(sheetName, defaultRetentionDays, configKey) {
 
   if (rowsToDelete.length === 0) return 0;
 
+  // B-09: Limit batch size to CLEANUP.MAX_BATCH_ROWS to reduce lock hold time
+  if (rowsToDelete.length > CLEANUP.MAX_BATCH_ROWS) {
+    rowsToDelete = rowsToDelete.slice(0, CLEANUP.MAX_BATCH_ROWS);
+    console.log('Cleanup: Batch limited to ' + CLEANUP.MAX_BATCH_ROWS + ' rows (more pending)');
+  }
+
   // Batch delete rows: group consecutive row numbers for efficient deleteRows()
   rowsToDelete.sort(function(a, b) { return b - a; }); // Sort descending
 

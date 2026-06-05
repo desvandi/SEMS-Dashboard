@@ -216,10 +216,13 @@ export function MobileSidebar() {
               <button
                 onClick={() => {
                   setOpen(false);
-                  window.location.href = '/login';
+                  // P2-TOKEN-04: Clear all auth data including sems_auth_meta and sems-auth-sig cookies
                   localStorage.removeItem('sems_token');
                   localStorage.removeItem('sems_user');
+                  localStorage.removeItem('sems_auth_meta');
                   document.cookie = 'sems-auth=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+                  document.cookie = 'sems-auth-sig=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+                  window.location.href = '/login';
                 }}
                 className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors w-full"
               >

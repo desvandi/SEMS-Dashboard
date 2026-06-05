@@ -3,6 +3,10 @@
  * ==============================================
  * Handles reading and updating system configurations.
  *
+ * SECURITY v1.1.0:
+ *   - Sensitive keys are masked ("***") in GET responses
+ *   - User-controlled values are sanitized before writing to sheets
+ *
  * Endpoints:
  *   GET  /api/config/get   — Get all configurations
  *   POST /api/config/update — Update configuration(s)
@@ -14,6 +18,7 @@
 
 /**
  * Return all system configurations as key-value pairs.
+ * Sensitive keys (device_token, admin_password, etc.) are masked as "***".
  * Accepts both device token and user token authentication.
  *
  * @param {Object} headers - Request headers
@@ -63,11 +68,24 @@ function handleConfigGet_(reqHeaders) {
     var configs = [];
 
     for (var i = 1; i < data.length; i++) {
+      var configKey = String(data[i][colKey]);
+      var configValue = String(data[i][colValue]);
+
+      // SECURITY: Mask sensitive keys in GET response
+      var isSensitive = false;
+      for (var s = 0; s < SENSITIVE_KEYS.length; s++) {
+        if (configKey === SENSITIVE_KEYS[s]) {
+          isSensitive = true;
+          break;
+        }
+      }
+
       configs.push({
-        key:         data[i][colKey],
-        value:       data[i][colValue],
+        key:         configKey,
+        value:       isSensitive ? '***' : configValue,
         description: data[i][colDesc],
-        updated_at:  data[i][colUpdated]
+        updated_at:  data[i][colUpdated],
+        sensitive:   isSensitive
       });
     }
 
@@ -120,134 +138,142 @@ function handleConfigUpdate_(payload, reqHeaders) {
     try {
       lock.waitLock(TELEMETRY.LOCK_WAIT_MS);
 
-    var ss = getSpreadsheet_();
-    var sheet = ss.getSheetByName(SHEET.CONFIGURATIONS);
+      var ss = getSpreadsheet_();
+      var sheet = ss.getSheetByName(SHEET.CONFIGURATIONS);
 
-    if (!sheet) {
-      return { success: false, error: 'configurations sheet not found', code: 500 };
-    }
+      if (!sheet) {
+        return { success: false, error: 'configurations sheet not found', code: 500 };
+      }
 
-    var data = sheet.getDataRange().getValues();
-    var headers_row = data[0];
+      var data = sheet.getDataRange().getValues();
+      var headers_row = data[0];
 
-    var colKey      = headers_row.indexOf('key');
-    var colValue    = headers_row.indexOf('value');
-    var colUpdated  = headers_row.indexOf('updated_at');
+      var colKey      = headers_row.indexOf('key');
+      var colValue    = headers_row.indexOf('value');
+      var colUpdated  = headers_row.indexOf('updated_at');
 
-    if (colKey === -1 || colValue === -1 || colUpdated === -1) {
-      return { success: false, error: 'Invalid configurations sheet structure', code: 500 };
-    }
+      if (colKey === -1 || colValue === -1 || colUpdated === -1) {
+        return { success: false, error: 'Invalid configurations sheet structure', code: 500 };
+      }
 
-    // Build list of updates to apply
-    var updates = [];
+      // Build list of updates to apply
+      var updates = [];
 
-    if (payload.updates && Array.isArray(payload.updates)) {
-      updates = payload.updates;
-    } else if (payload.key && payload.value !== undefined) {
-      updates = [{ key: payload.key, value: String(payload.value) }];
-    } else if (payload.send_test_email) {
-      // Special action: send test email instead of saving a config value
-      var testResult = sendTestEmail_();
-      return {
-        success: testResult.sent,
-        message: testResult.message,
-        code: testResult.sent ? 200 : 400
-      };
-    } else {
-      return { success: false, error: 'Provide { key, value } or { updates: [...] }', code: 400 };
-    }
-
-    // Sensitive keys that require admin
-    // Action keys that are handled above and should not be saved
-    var actionKeys = ['send_test_email'];
-    var sensitiveKeys = ['device_token', 'notification_email'];
-
-    var applied = [];
-    var now = getTimestamp_();
-
-    for (var u = 0; u < updates.length; u++) {
-      var update = updates[u];
-      if (!update.key) continue;
-
-      // Skip action keys (should not be saved to spreadsheet)
-      if (actionKeys.indexOf(update.key) !== -1) continue;
-
-      // Check sensitivity
-      if (sensitiveKeys.indexOf(update.key) !== -1 && auth.user.role !== USER_ROLE.ADMIN) {
+      if (payload.updates && Array.isArray(payload.updates)) {
+        updates = payload.updates;
+      } else if (payload.key && payload.value !== undefined) {
+        updates = [{ key: payload.key, value: String(payload.value) }];
+      } else if (payload.send_test_email) {
+        // Special action: send test email instead of saving a config value
+        var testResult = sendTestEmail_();
         return {
-          success: false,
-          error: 'Cannot modify sensitive key "' + update.key + '". Admin role required.',
-          code: 403
+          success: testResult.sent,
+          message: testResult.message,
+          code: testResult.sent ? 200 : 400
         };
+      } else {
+        return { success: false, error: 'Provide { key, value } or { updates: [...] }', code: 400 };
       }
 
-      // Validate email format for notification_email
-      if (update.key === 'notification_email' && update.value) {
-        var emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(String(update.value))) {
-          return { success: false, error: 'Invalid email format for notification_email', code: 400 };
+      // Sensitive keys that require admin
+      // Action keys that are handled above and should not be saved
+      var actionKeys = ['send_test_email'];
+      var sensitiveKeys = ['device_token', 'notification_email'];
+
+      var applied = [];
+      var now = getTimestamp_();
+
+      for (var u = 0; u < updates.length; u++) {
+        var update = updates[u];
+        if (!update.key) continue;
+
+        // Skip action keys (should not be saved to spreadsheet)
+        if (actionKeys.indexOf(update.key) !== -1) continue;
+
+        // Check sensitivity
+        if (sensitiveKeys.indexOf(update.key) !== -1 && auth.user.role !== USER_ROLE.ADMIN) {
+          return {
+            success: false,
+            error: 'Cannot modify sensitive key "' + update.key + '". Admin role required.',
+            code: 403
+          };
         }
-      }
 
-      // Find and update the key
-      var found = false;
-      for (var i = 1; i < data.length; i++) {
-        if (String(data[i][colKey]) === String(update.key)) {
-          sheet.getRange(i + 1, colValue + 1).setValue(String(update.value));
-          sheet.getRange(i + 1, colUpdated + 1).setValue(now);
-          found = true;
+        // Validate email format for notification_email
+        if (update.key === 'notification_email' && update.value) {
+          // B-15: Header-injection check — reject if contains \n, \r, or comma
+          var emailVal = String(update.value);
+          if (emailVal.indexOf('\n') !== -1 || emailVal.indexOf('\r') !== -1 || emailVal.indexOf(',') !== -1) {
+            return { success: false, error: 'notification_email contains invalid characters (newlines or commas)', code: 400 };
+          }
+          var emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+          if (!emailRegex.test(emailVal)) {
+            return { success: false, error: 'Invalid email format for notification_email', code: 400 };
+          }
+        }
+
+        // SECURITY: Sanitize user-controlled value to prevent formula injection
+        var sanitizedValue = sanitizeCellValue_(String(update.value));
+
+        // Find and update the key
+        var found = false;
+        for (var i = 1; i < data.length; i++) {
+          if (String(data[i][colKey]) === String(update.key)) {
+            sheet.getRange(i + 1, colValue + 1).setValue(sanitizedValue);
+            sheet.getRange(i + 1, colUpdated + 1).setValue(now);
+            found = true;
+            applied.push({
+              key: update.key,
+              value: String(update.value), // Return original value (not sanitized)
+              updated_at: now
+            });
+            break;
+          }
+        }
+
+        if (!found) {
+          // Validate key against whitelist before creating new entry
+          var allowedKeys = DEFAULT_CONFIGS.map(function(c) { return c.key; });
+          if (allowedKeys.indexOf(update.key) === -1) {
+            return { success: false, error: 'Unknown configuration key: ' + update.key, code: 400 };
+          }
+          // Create new config entry
+          sheet.appendRow([sanitizeCellValue_(update.key), sanitizedValue, '', now]);
           applied.push({
             key: update.key,
             value: String(update.value),
-            updated_at: now
+            updated_at: now,
+            created: true
           });
-          break;
         }
       }
 
-      if (!found) {
-        // Validate key against whitelist before creating new entry
-        var allowedKeys = DEFAULT_CONFIGS.map(function(c) { return c.key; });
-        if (allowedKeys.indexOf(update.key) === -1) {
-          return { success: false, error: 'Unknown configuration key: ' + update.key, code: 400 };
+      // Invalidate relevant caches
+      var cache = CacheService.getScriptCache();
+      cache.remove(CACHE.CONFIG_CACHE_KEY);
+      cache.remove(AUTH.DEVICE_TOKEN_CACHE_KEY);
+      // Invalidate config value cache (defined in Auth.gs)
+      _configCache_ = null;
+      _configCacheTime_ = 0;
+
+      // Also invalidate specific caches if config affects them
+      var retentionChanged = false;
+      for (var a = 0; a < applied.length; a++) {
+        if (applied[a].key.indexOf('retention') !== -1) {
+          retentionChanged = true;
         }
-        // Create new config entry
-        sheet.appendRow([update.key, String(update.value), '', now]);
-        applied.push({
-          key: update.key,
-          value: String(update.value),
-          updated_at: now,
-          created: true
-        });
       }
-    }
-
-    // Invalidate relevant caches
-    var cache = CacheService.getScriptCache();
-    cache.remove(CACHE.CONFIG_CACHE_KEY);
-    cache.remove(AUTH.DEVICE_TOKEN_CACHE_KEY);
-    // Invalidate config value cache (defined in Auth.gs)
-    _configCache_ = null;
-    _configCacheTime_ = 0;
-
-    // Also invalidate specific caches if config affects them
-    var retentionChanged = false;
-    for (var a = 0; a < applied.length; a++) {
-      if (applied[a].key.indexOf('retention') !== -1) {
-        retentionChanged = true;
+      if (retentionChanged) {
+        console.log('Config: Retention settings changed, will take effect on next cleanup');
       }
-    }
-    if (retentionChanged) {
-      console.log('Config: Retention settings changed, will take effect on next cleanup');
-    }
 
-    console.log('Config: User "' + auth.user.username + '" updated ' + applied.length + ' config(s)');
+      console.log('Config: User "' + auth.user.username + '" updated ' + applied.length + ' config(s)');
 
-    return {
-      success: true,
-      message: applied.length + ' configuration(s) updated',
-      updated: applied
-    };
+      return {
+        success: true,
+        message: applied.length + ' configuration(s) updated',
+        updated: applied
+      };
 
     } catch (lockError) {
       return { success: false, error: 'Server busy. Could not acquire lock.', code: 503 };

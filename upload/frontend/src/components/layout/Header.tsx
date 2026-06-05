@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import { useState, useEffect } from 'react';
 import { fetchAlarms } from '@/lib/api';
 import { useSemsAuth } from '@/hooks/useSemsAuth';
+import { usePathname } from 'next/navigation';
 
 interface HeaderProps {
   isConnected: boolean;
@@ -18,9 +19,15 @@ export function Header({ isConnected, lastUpdated, onRefresh }: HeaderProps) {
   const { user: session } = useSemsAuth();
   const [unackCount, setUnackCount] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const pathname = usePathname();
 
-  // Poll alarm count every 30s
+  // Fix #6: Avoid fetching alarm count when dashboard isn't active.
+  // Only poll when the user is on a dashboard page (where alarms are relevant).
+  const isDashboardActive = pathname?.startsWith('/dashboard');
+
   useEffect(() => {
+    if (!isDashboardActive) return;
+
     let active = true;
     const tick = async () => {
       if (!active || document.hidden) return;
@@ -40,7 +47,7 @@ export function Header({ isConnected, lastUpdated, onRefresh }: HeaderProps) {
       clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, []);
+  }, [isDashboardActive]);
 
   const handleRefresh = () => {
     setRefreshing(true);

@@ -3,6 +3,11 @@
  * =====================================
  * Handles telemetry data ingestion from ESP32 and retrieval by frontend.
  *
+ * SECURITY v1.1.0:
+ *   - Numeric range validation for all sensor values
+ *   - Cleanup optimization (runs every Nth POST instead of every POST)
+ *   - Formula injection prevention on cell writes
+ *
  * Endpoints:
  *   POST /api/telemetry         — Receive telemetry (ESP32 → Cloud)
  *   GET  /api/telemetry/latest  — Get latest telemetry (Frontend → Cloud)
@@ -46,6 +51,17 @@ function handleTelemetryPost_(payload, reqHeaders) {
     // Ensure timestamp exists
     if (!payload.timestamp) {
       payload.timestamp = getTimestamp_();
+    }
+
+    // --- SECURITY: Numeric range validation ---
+    var rangeErrors = validateTelemetryRanges_(payload);
+    if (rangeErrors.length > 0) {
+      return {
+        success: false,
+        error: 'Telemetry values out of acceptable range: ' + rangeErrors.join('; '),
+        code: 400,
+        invalidFields: rangeErrors
+      };
     }
 
     // --- Normalize firmware payload ---
@@ -102,9 +118,10 @@ function handleTelemetryPost_(payload, reqHeaders) {
       // ---- Evaluate alarm conditions & send email ----
       var notification = evaluateAndNotify_(payload);
 
-      // ---- Run data cleanup (async-like, with lock already held) ----
-      // NOTE: Moved outside lock in finally block to avoid holding lock during cleanup
-      var cleanupNeeded = true;
+      // ---- Determine if cleanup should run (optimized) ----
+      // SECURITY/OPTIMIZATION: Only run cleanup every Nth telemetry POST
+      // to reduce spreadsheet I/O. Uses a CacheService counter.
+      var cleanupNeeded = shouldRunCleanup_();
 
       console.log('Telemetry: Received from ESP32, SOC=' + (payload.soc_percent || 'N/A') +
                   '%, V=' + (payload.battery_voltage || 'N/A') + 'V');
@@ -125,11 +142,13 @@ function handleTelemetryPost_(payload, reqHeaders) {
       };
     } finally {
       try { lock.releaseLock(); } catch (e) {}
-      // Run data cleanup AFTER releasing lock to avoid holding it during cleanup
-      if (cleanupNeeded) {
-        try { runDataCleanup_(true); } catch (cleanupErr) {
-          console.error('Cleanup after telemetry error: ' + cleanupErr.message);
-        }
+    }
+
+    // B-06: Run data cleanup OUTSIDE lock (after finally), with random jitter
+    // 50% chance to run even when cleanupNeeded is true, reducing lock collision
+    if (cleanupNeeded && Math.random() < 0.5) {
+      try { runDataCleanup_(true); } catch (cleanupErr) {
+        console.error('Cleanup after telemetry error: ' + cleanupErr.message);
       }
     }
 
@@ -245,7 +264,7 @@ function handleTelemetryHistory_(params, reqHeaders) {
 
     // Parse date range filters (support both start/end and from/to param names)
     var startDate = (params.start || params.from) ? new Date(params.start || params.from) : null;
-    var endDate   = (params.end   || params.to)   ? new Date(params.end || params.to) : null;
+    var endDate   = (params.end || params.to)   ? new Date(params.end || params.to) : null;
 
     // Limit & offset for pagination
     var limit  = Math.min(parseInt(params.limit) || 1000, TELEMETRY.MAX_HISTORY_ROWS);
@@ -313,6 +332,110 @@ function handleTelemetryHistory_(params, reqHeaders) {
 }
 
 // ============================================================
+// SECURITY: Numeric Range Validation
+// ============================================================
+
+/**
+ * Validate telemetry payload values are within acceptable ranges.
+ * Rejects payloads with physically impossible values that could indicate
+ * sensor malfunction, firmware bugs, or malicious data injection.
+ *
+ * Ranges:
+ *   - Voltage: 0-60V (covers battery + solar panel scenarios)
+ *   - Current: -200 to 200A (bidirectional, covers charging/discharging)
+ *   - Temperature: -20 to 80°C (indoor/outdoor range)
+ *   - SOC: 0-100% (battery state of charge percentage)
+ *
+ * @param {Object} payload - Telemetry data
+ * @returns {Array} Array of error strings (empty if all valid)
+ */
+function validateTelemetryRanges_(payload) {
+  var errors = [];
+
+  var v = parseFloat(payload.battery_voltage);
+  if (!isNaN(v) && (v < 0 || v > 60)) {
+    errors.push('battery_voltage=' + v + 'V (valid: 0-60V)');
+  }
+
+  var i = parseFloat(payload.battery_current);
+  if (!isNaN(i) && (i < -200 || i > 200)) {
+    errors.push('battery_current=' + i + 'A (valid: -200 to 200A)');
+  }
+
+  var inv = parseFloat(payload.inverter_current);
+  if (!isNaN(inv) && (inv < -200 || inv > 200)) {
+    errors.push('inverter_current=' + inv + 'A (valid: -200 to 200A)');
+  }
+
+  var temp = parseFloat(payload.room_temp);
+  if (!isNaN(temp) && (temp < -20 || temp > 80)) {
+    errors.push('room_temp=' + temp + '°C (valid: -20 to 80°C)');
+  }
+
+  var soc = parseFloat(payload.soc_percent);
+  if (!isNaN(soc) && (soc < 0 || soc > 100)) {
+    errors.push('soc_percent=' + soc + '% (valid: 0-100%)');
+  }
+
+  // Validate individual cell voltages
+  for (var c = 1; c <= 8; c++) {
+    var cellV = parseFloat(payload['cell' + c + '_v']);
+    if (!isNaN(cellV) && (cellV < 0 || cellV > 60)) {
+      errors.push('cell' + c + '_v=' + cellV + 'V (valid: 0-60V)');
+    }
+  }
+
+  // B-14: Validate WiFi RSSI (-100 to 0 dBm typical range, allow -120 to 10 as buffer)
+  var wifiRssi = parseFloat(payload.wifi_rssi);
+  if (!isNaN(wifiRssi) && (wifiRssi < -120 || wifiRssi > 10)) {
+    errors.push('wifi_rssi=' + wifiRssi + 'dBm (valid: -120 to 10dBm)');
+  }
+
+  // B-14: Validate free heap (0 to 1MB typical for ESP32)
+  var freeHeap = parseFloat(payload.free_heap);
+  if (!isNaN(freeHeap) && (freeHeap < 0 || freeHeap > 1048576)) {
+    errors.push('free_heap=' + freeHeap + 'B (valid: 0 to 1048576B)');
+  }
+
+  // B-14: Validate uptime (0 to 10 years in seconds)
+  var uptime = parseFloat(payload.uptime_seconds);
+  if (!isNaN(uptime) && (uptime < 0 || uptime > 315360000)) {
+    errors.push('uptime_seconds=' + uptime + 's (valid: 0 to 315360000s)');
+  }
+
+  return errors;
+}
+
+// ============================================================
+// OPTIMIZATION: Cleanup Throttle
+// ============================================================
+
+/**
+ * Determine whether cleanup should run on this telemetry POST.
+ * Uses a CacheService counter to run cleanup only every Nth POST,
+ * reducing spreadsheet I/O from every 15 seconds to every ~2.5 minutes.
+ *
+ * @returns {boolean} True if cleanup should run this time
+ */
+function shouldRunCleanup_() {
+  var cache = CacheService.getScriptCache();
+  var countStr = cache.get(CACHE.CLEANUP_COUNTER_KEY);
+  var count = parseInt(countStr) || 0;
+
+  count++;
+
+  if (count >= CLEANUP.RUN_EVERY_N_POSTS) {
+    // Reset counter
+    cache.put(CACHE.CLEANUP_COUNTER_KEY, '0', 3600);
+    return true;
+  }
+
+  // Increment counter with 1-hour TTL (auto-resets if no telemetry for a while)
+  cache.put(CACHE.CLEANUP_COUNTER_KEY, String(count), 3600);
+  return false;
+}
+
+// ============================================================
 // HELPERS
 // ============================================================
 
@@ -358,6 +481,7 @@ function normalizeTelemetryPayload_(payload) {
 /**
  * Build a telemetry row array matching the TELEMETRY_HEADERS order.
  * Ensures all columns are populated in the correct sequence.
+ * Applies sanitizeCellValue_ to all string fields.
  *
  * @param {Object} payload - Telemetry data from ESP32
  * @returns {Array} Row array for spreadsheet insertion
@@ -365,7 +489,12 @@ function normalizeTelemetryPayload_(payload) {
 function buildTelemetryRow_(payload) {
   return TELEMETRY_HEADERS.map(function(header) {
     if (payload.hasOwnProperty(header)) {
-      return payload[header];
+      var val = payload[header];
+      // SECURITY: Sanitize string values to prevent formula injection
+      if (typeof val === 'string') {
+        return sanitizeCellValue_(val);
+      }
+      return val;
     }
     // Provide defaults for missing fields
     switch (header) {

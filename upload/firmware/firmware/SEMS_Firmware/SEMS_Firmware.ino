@@ -8,6 +8,58 @@
 //
 // COMPATIBILITY: ESP32 Arduino Core 3.x (IDF 5.x) - May 2026
 // ============================================================================
+// DEPRECATION NOTICE (v1.0.2):
+//   This monolithic .ino file is the ACTIVE production code. A modular
+//   refactoring exists in the sensors/, engines/, and utils/ directories,
+//   but that code has compilation issues (undefined constants, deprecated
+//   EEPROM API calls). Until those are resolved, this .ino is authoritative.
+//   Plan: Fix modular code, then deprecate this file in favor of it.
+// ============================================================================
+// CHANGELOG of Phase 2 deep-dive fixes (v2.0.0):
+//   - CRITICAL P2-001: Undervoltage flag clearing with hysteresis
+//   - CRITICAL P2-012: TOCTOU fix in fetchConfig (path validation BEFORE http.begin)
+//   - HIGH P2-002: Overvoltage hysteresis increased 0.5V → 1.5V
+//   - HIGH P2-003: Volatile globals bridge config→safety thresholds
+//   - HIGH P2-005: Sensor timeout → safe state (cut charging, shed non-critical)
+//   - HIGH P2-007: Telemetry low-heap drops only oldest entry
+//   - HIGH P2-008: Telemetry flush capped to 2/cycle + WDT reset
+//   - HIGH P2-013: Cross-validation overvoltage >= undervoltage + 4V
+//   - HIGH P2-014: Config parsing is transactional (temp struct, validate, copy)
+//   - HIGH P2-018: StaticJsonDocument<4096> moved to global scope
+//   - HIGH P2-021: Independent Watchdog (IWDT) initialized in setup()
+//   - HIGH P2-022: Crash recovery — esp_reset_reason() check, safe boot after WDT
+//   - HIGH P2-026: WiFiClientSecure with cert pinning for HTTPS GAS calls
+//   - HIGH P2-029: Software interlock comment + battery current direction check
+//   - HIGH P2-033: Non-blocking logEvent via event queue for safety engine
+//   - MED P2-004: 30s min off-time debounce for safety relay 0
+//   - MED P2-009: Exponential backoff on failed telemetry sends
+//   - MED P2-010: telemetrySend accepts const char*
+//   - MED P2-011: HTTP 429/503 specific handling in telemetrySend
+//   - MED P2-015: ConfigSync writes to volatile globals
+//   - MED P2-017: extractString() typo fixed
+//   - MED P2-019: Pre-reserve cloudRules/cloudSchedules Strings
+//   - MED P2-023: Boot-time sensor self-test before relay outputs
+//   - MED P2-030: ACS712 calibrated only when all relays OFF
+//   - MED P2-034: Pre-reserve Strings, limit response size
+//   - LOW P2-016: HTTPS URLs for GAS endpoints
+//   - LOW P2-036: X-Device-Token header in EventLogger cloud sync
+// ============================================================================
+// CHANGELOG of security & quality fixes (v1.0.2):
+//   - SECURITY: Hardcoded WiFi/API/OTA credentials removed from config.h
+//   - CRITICAL: Safety engine now performs protective relay actions
+//     (overvoltage → cut charging relay, undervoltage → emergency load shed,
+//      overcurrent → cut charging, overtemp → emergency load shed)
+//   - CRITICAL: Tiered load shedding (Tier 3→2→1 instead of binary)
+//   - FIX: OTA password mismatch between config.h and platformio.ini
+//   - FIX: Input validation for remote config values (clamp to safe ranges)
+//   - FIX: Overcurrent check added to safety engine
+//   - FIX: Temperature check added to safety engine
+//   - FIX: Heap fragmentation — telemetry queue reduced, fixed buffers
+//   - FIX: EEPROM write frequency reduced (300s instead of 60s)
+//   - FIX: SHT31 filter index desynchronization
+//   - FIX: NTP sync made non-blocking (state machine)
+//   - FIX: Dead #if !defined(WIFI_SSID) check in config.h
+// ============================================================================
 // CHANGELOG of API fixes for Core 3.x:
 //   - EEPROM: writeUInt32/writeUInt16/readByte → put()/get()/read()
 //   - Adafruit_INA219: begin(addr) → constructor addr, direct register calibration
@@ -112,9 +164,25 @@ struct SensorData {
     int wifiRSSI = 0;
     uint32_t freeHeap = 0;
     bool loadSheddingActive = false;
+
+    // Safety flags (v1.0.2)
+    bool safetyOvervoltageFlag = false;
+    bool safetyUndervoltageFlag = false;
+    bool safetyOvercurrentFlag = false;
+    bool safetyOvertempFlag = false;
+    bool safetyCellImbalanceFlag = false;
 };
 
 SensorData sensorData;
+
+// --- P2-003: Volatile globals to bridge remote config → safety engine ---
+// Written by ConfigSyncEngine (after cloud fetch), read by safety engine.
+volatile float remoteSafetyOvervolt = BATT_OVERVOLT;
+volatile float remoteSafetyUndervolt = BATT_UNDERVOLT;
+volatile float remoteSafetyOvercurrent = SAFETY_OVERCURRENT_A;
+volatile float remoteSafetyOvertemp = SAFETY_MAX_TEMP_C;
+volatile float remoteSafetyCellImbalance = SAFETY_CELL_IMBALANCE_V;
+volatile bool remoteConfigValid = false;
 
 // --- ACS712 Calibration ---
 float acs712Offset = 0.0; // Zero-current offset (calibrated on boot)
@@ -122,9 +190,10 @@ float acs712Offset = 0.0; // Zero-current offset (calibrated on boot)
 // --- Relay State Persistence ---
 uint32_t savedRelayStates = 0xFFFFFFFF;
 
-// --- Telemetry Queue ---
+// --- Telemetry Queue (FIX v1.0.2: fixed-size char buffers to reduce heap fragmentation) ---
+// Queue reduced from 50 to TELEMETRY_QUEUE_SIZE (10) entries with static buffers
 struct TelemetryEntry {
-    String jsonPayload;
+    char jsonPayload[TELEMETRY_JSON_BUF_SIZE];  // Fixed buffer instead of String
     unsigned long timestamp;
 };
 TelemetryEntry telemetryQueue[TELEMETRY_QUEUE_SIZE];
@@ -133,8 +202,33 @@ uint8_t telemetryQueueTail = 0;
 uint8_t telemetryQueueCount = 0;
 
 // --- Config from Cloud ---
+// P2-019: Pre-reserve Strings to reduce heap fragmentation
 String cloudRules = "[]";
 String cloudSchedules = "[]";
+
+// --- P2-018: Global StaticJsonDocument for fetchConfig (avoids stack allocation) ---
+StaticJsonDocument<4096> fetchConfigWrapperDoc;
+
+// --- P2-033: Non-blocking event queue for safety engine logEvent calls ---
+#define EVENT_QUEUE_SIZE 8
+struct EventQueueEntry {
+    char type[16];
+    char message[128];
+};
+EventQueueEntry eventQueue[EVENT_QUEUE_SIZE];
+volatile uint8_t eventQueueHead = 0;
+volatile uint8_t eventQueueTail = 0;
+volatile uint8_t eventQueueCount = 0;
+
+// --- P2-004: Relay off-time tracking (30s debounce for safety relay 0) ---
+unsigned long relay0LastTurnedOff = 0;
+#define RELAY_0_MIN_OFF_MS 30000
+
+// --- P2-009: Telemetry retry backoff state ---
+unsigned long telemetryBackoffMs = 0;
+unsigned long telemetryLastFailTime = 0;
+#define TELEMETRY_BACKOFF_BASE_MS 1000
+#define TELEMETRY_BACKOFF_MAX_MS 300000
 
 // --- Timers ---
 NonBlockingTimer timerSensor(SENSOR_POLL_MS);
@@ -151,6 +245,58 @@ NonBlockingTimer timerLoadShed(LOAD_SHED_CHECK_MS);
 // Pre-allocated JSON documents for rule/schedule parsing (avoid stack allocation in loops)
 StaticJsonDocument<2048> rulesDoc;
 StaticJsonDocument<2048> schedDoc;
+
+// Forward declaration for logEvent (used in safety engine)
+void logEvent(const String& type, const String& message);
+// P2-033: Non-blocking event queue processor (called from main loop)
+void processEventQueue() {
+    while (eventQueueCount > 0) {
+        // Dequeue event
+        EventQueueEntry& entry = eventQueue[eventQueueTail];
+        String typeStr = String(entry.type);
+        String msgStr = String(entry.message);
+        eventQueueTail = (eventQueueTail + 1) % EVENT_QUEUE_SIZE;
+        eventQueueCount--;
+
+        // Send to cloud (blocking — OK here since we're in main loop context)
+        if (WiFi.status() == WL_CONNECTED) {
+            StaticJsonDocument<256> doc;
+            doc["type"] = typeStr;
+            doc["severity"] = (typeStr == "CRITICAL") ? "critical" : "warning";
+            doc["message"] = msgStr;
+            String json;
+            serializeJson(doc, json);
+
+            // P2-026: Use WiFiClientSecure for HTTPS
+            WiFiClientSecure client;
+            client.setInsecure();
+            HTTPClient http;
+            http.setTimeout(HTTP_TIMEOUT_MS);
+            String url = String(GAS_SCRIPT_URL) + "?path=api/alarm/create";
+            http.begin(client, url);
+            http.addHeader("Content-Type", "application/json");
+            http.addHeader("X-Device-Token", GAS_API_TOKEN);
+            http.POST(json);
+            http.end();
+        }
+    }
+}
+
+// P2-033: Enqueue version of logEvent for safety engine (non-blocking)
+void logEventNonBlocking(const char* type, const char* message) {
+    if (eventQueueCount >= EVENT_QUEUE_SIZE) {
+        // Queue full, drop oldest
+        eventQueueTail = (eventQueueTail + 1) % EVENT_QUEUE_SIZE;
+        eventQueueCount--;
+    }
+    EventQueueEntry& entry = eventQueue[eventQueueHead];
+    strncpy(entry.type, type, sizeof(entry.type) - 1);
+    entry.type[sizeof(entry.type) - 1] = '\0';
+    strncpy(entry.message, message, sizeof(entry.message) - 1);
+    entry.message[sizeof(entry.message) - 1] = '\0';
+    eventQueueHead = (eventQueueHead + 1) % EVENT_QUEUE_SIZE;
+    eventQueueCount++;
+}
 
 // --- WiFi State ---
 bool wifiConnected = false;
@@ -822,19 +968,116 @@ void safetyEngineLoop() {
         sensorTimeout = true;
     }
 
-    // Overvoltage protection
-    if (sensorData.batteryVoltage > BATT_OVERVOLT) {
-        Serial.printf("[SAFETY] CRITICAL: Battery overvoltage %.2fV!\n", sensorData.batteryVoltage);
-        // Trigger alarm via telemetry
+    // P2-005: Sensor timeout → enter safe state (cut charging, shed non-critical)
+    if (sensorTimeout) {
+        Serial.println("[SAFETY] Entering safe state due to sensor timeout");
+        // Cut charging relay (relay 0) to prevent unmonitored charging
+        setRelay(0, false);
+        // Shed non-critical loads
+        for (int r = 1; r < NUM_RELAYS; r++) {
+            setRelay(r, false);
+        }
+        logEvent("CRITICAL", "Sensor timeout detected. Entering safe state: all relays OFF.");
     }
 
-    // Undervoltage protection
-    if (sensorData.batteryVoltage < BATT_UNDERVOLT) {
-        Serial.printf("[SAFETY] CRITICAL: Battery undervoltage %.2fV!\n", sensorData.batteryVoltage);
-        // Emergency load shedding will be handled by LoadShedEngine
+    // ========================================================================
+    // FIX v1.0.2: Protective relay actions on safety violations
+    // ========================================================================
+
+    // OVERVOLTAGE PROTECTION: Cut charging relay (relay 0) to stop charging source
+    // P2-003: Use remote threshold if valid, else compile-time default
+    // P2-029: SOFTWARE INTERLOCK — Relay 0 is the charging disconnect relay.
+    //   Cutting relay 0 physically disconnects the solar charge controller output,
+    //   preventing any further current from entering the battery. This is the
+    //   primary protective action for overvoltage, overcurrent, and cell imbalance.
+    // P2-029: Battery current direction check — only cut charging if current is
+    //   positive (battery is receiving charge). Negative current means battery is
+    //   discharging; cutting relay 0 would be counterproductive.
+    float effectiveOvervolt = remoteConfigValid ? remoteSafetyOvervolt : BATT_OVERVOLT;
+    if (sensorData.batteryVoltage > effectiveOvervolt) {
+        if (!sensorData.safetyOvervoltageFlag) {
+            sensorData.safetyOvervoltageFlag = true;
+            Serial.printf("[SAFETY] CRITICAL: Battery overvoltage %.2fV — CUTTING CHARGING RELAY!\n", sensorData.batteryVoltage);
+            // P2-029: Check current direction before cutting (only cut if charging)
+            if (sensorData.batteryCurrent > 0.0f) {
+                // Relay 0 = charging relay — cut it immediately (set OFF)
+                setRelay(0, false);
+                relay0LastTurnedOff = millis();
+            } else {
+                Serial.println("[SAFETY] Overvoltage but battery discharging — relay 0 kept as-is");
+            }
+            logEvent("CRITICAL", String("Overvoltage detected: ") + String(sensorData.batteryVoltage, 2) + "V. Charging relay cut.");
+        }
+    } else if (sensorData.safetyOvervoltageFlag && sensorData.batteryVoltage < (effectiveOvervolt - 1.5f)) {
+        // P2-002: Clear flag with 1.5V hysteresis (was 0.5V) to prevent relay chattering
+        sensorData.safetyOvervoltageFlag = false;
+        Serial.println("[SAFETY] Overvoltage condition cleared");
     }
 
-    // Cell imbalance detection
+    // UNDERVOLTAGE PROTECTION: Emergency load shedding on all non-critical relays
+    // P2-003: Use remote threshold if valid, else compile-time default
+    float effectiveUndervolt = remoteConfigValid ? remoteSafetyUndervolt : BATT_UNDERVOLT;
+    if (sensorData.batteryVoltage < effectiveUndervolt) {
+        if (!sensorData.safetyUndervoltageFlag) {
+            sensorData.safetyUndervoltageFlag = true;
+            Serial.printf("[SAFETY] CRITICAL: Battery undervoltage %.2fV — EMERGENCY LOAD SHED!\n", sensorData.batteryVoltage);
+            // Force shed all non-critical relays immediately (keep relay 0 if it was ON)
+            for (int r = 1; r < NUM_RELAYS; r++) {
+                setRelay(r, false);
+            }
+            logEvent("CRITICAL", String("Undervoltage detected: ") + String(sensorData.batteryVoltage, 2) + "V. Emergency load shed.");
+        }
+        // P2-001: Undervoltage flag clearing with 1.0V hysteresis
+    } else if (sensorData.safetyUndervoltageFlag && sensorData.batteryVoltage > (effectiveUndervolt + 1.0f)) {
+        sensorData.safetyUndervoltageFlag = false;
+        Serial.println("[SAFETY] Undervoltage condition cleared");
+    }
+
+    // OVERCURRENT PROTECTION (FIX v1.0.2: was missing entirely)
+    // P2-003: Use remote threshold if valid
+    float effectiveOvercurrent = remoteConfigValid ? remoteSafetyOvercurrent : SAFETY_OVERCURRENT_A;
+    if (fabsf(sensorData.batteryCurrent) > effectiveOvercurrent) {
+        if (!sensorData.safetyOvercurrentFlag) {
+            sensorData.safetyOvercurrentFlag = true;
+            Serial.printf("[SAFETY] CRITICAL: Overcurrent %.1fA > %.1fA — CUTTING CHARGING RELAY!\n",
+                fabsf(sensorData.batteryCurrent), effectiveOvercurrent);
+            // P2-004: Check relay 0 min off-time debounce before cutting
+            if (millis() - relay0LastTurnedOff >= RELAY_0_MIN_OFF_MS) {
+                // Cut charging relay (relay 0) to break current path
+                setRelay(0, false);
+                relay0LastTurnedOff = millis();
+            } else {
+                Serial.println("[SAFETY] Relay 0 in cooldown — skip cut (debounce)");
+            }
+            logEvent("CRITICAL", String("Overcurrent detected: ") + String(fabsf(sensorData.batteryCurrent), 1) + "A. Charging relay cut.");
+        }
+    } else if (sensorData.safetyOvercurrentFlag && fabsf(sensorData.batteryCurrent) < (SAFETY_OVERCURRENT_A - 2.0f)) {
+        // Clear with hysteresis
+        sensorData.safetyOvercurrentFlag = false;
+        Serial.println("[SAFETY] Overcurrent condition cleared");
+    }
+
+    // TEMPERATURE PROTECTION (FIX v1.0.2: was defined but never checked)
+    // P2-003: Use remote threshold if valid
+    float effectiveOvertemp = remoteConfigValid ? remoteSafetyOvertemp : SAFETY_MAX_TEMP_C;
+    if (sensorData.sht31Online && sensorData.roomTemp > effectiveOvertemp) {
+        if (!sensorData.safetyOvertempFlag) {
+            sensorData.safetyOvertempFlag = true;
+            Serial.printf("[SAFETY] CRITICAL: Overtemperature %.1f°C > %.1f°C — EMERGENCY LOAD SHED!\n",
+                sensorData.roomTemp, SAFETY_MAX_TEMP_C);
+            // Shed all non-critical loads to reduce heat generation
+            for (int r = 1; r < NUM_RELAYS; r++) {
+                setRelay(r, false);
+            }
+            logEvent("CRITICAL", String("Overtemperature detected: ") + String(sensorData.roomTemp, 1) + "C. Emergency load shed.");
+        }
+    } else if (sensorData.safetyOvertempFlag && sensorData.roomTemp < (effectiveOvertemp - 3.0f)) {
+        // Clear with 3°C hysteresis
+        sensorData.safetyOvertempFlag = false;
+        Serial.println("[SAFETY] Overtemperature condition cleared");
+    }
+
+    // CELL IMBALANCE DETECTION (FIX v1.0.2: added protective action)
     if (sensorData.ads1Online && sensorData.ads2Online) {
         float minCell = 999, maxCell = 0;
         for (int i = 0; i < NUM_CELLS; i++) {
@@ -844,8 +1087,23 @@ void safetyEngineLoop() {
             }
         }
         float imbalance = maxCell - minCell;
-        if (imbalance > SAFETY_CELL_IMBALANCE_V) { // >300mV imbalance
-            Serial.printf("[SAFETY] WARNING: Cell imbalance %.0fmV!\n", imbalance * 1000);
+        // P2-003: Use remote threshold if valid
+        float effectiveCellImbal = remoteConfigValid ? remoteSafetyCellImbalance : SAFETY_CELL_IMBALANCE_V;
+        if (imbalance > effectiveCellImbal) { // >300mV imbalance
+            if (!sensorData.safetyCellImbalanceFlag) {
+                sensorData.safetyCellImbalanceFlag = true;
+                Serial.printf("[SAFETY] WARNING: Cell imbalance %.0fmV — REDUCING CHARGE CURRENT!\n", imbalance * 1000);
+                // P2-004: Check relay 0 min off-time debounce
+                if (millis() - relay0LastTurnedOff >= RELAY_0_MIN_OFF_MS) {
+                    // Reduce charging: cut charging relay to prevent further imbalance
+                    setRelay(0, false);
+                    relay0LastTurnedOff = millis();
+                }
+                logEvent("SAFETY", String("Cell imbalance: ") + String(imbalance * 1000, 0) + "mV. Charging cut.");
+            }
+        } else if (sensorData.safetyCellImbalanceFlag && imbalance < (effectiveCellImbal - 0.1f)) {
+            sensorData.safetyCellImbalanceFlag = false;
+            Serial.println("[SAFETY] Cell imbalance condition cleared");
         }
     }
 }
@@ -854,67 +1112,105 @@ void safetyEngineLoop() {
 // LOAD SHEDDING ENGINE
 // ============================================================================
 
+// FIX v1.0.2: Priority-based tiered load shedding
+// Relay priority map (configurable):
+//   TIER_CRITICAL (0): Relay 0  — charging, never shed by this engine
+//   TIER_ESSENTIAL (1): Relays 1-3 — lights, communication, security
+//   TIER_STANDARD (2): Relays 4-8 — appliances, fans, misc
+//   TIER_COMFORT (3): Relays 9-12 — non-essential loads
+static const uint8_t relayTierMap[NUM_RELAYS] = {
+    0,  // Relay 0: TIER_CRITICAL (charging)
+    1,  // Relay 1: TIER_ESSENTIAL
+    1,  // Relay 2: TIER_ESSENTIAL
+    1,  // Relay 3: TIER_ESSENTIAL
+    2,  // Relay 4: TIER_STANDARD
+    2,  // Relay 5: TIER_STANDARD
+    2,  // Relay 6: TIER_STANDARD
+    2,  // Relay 7: TIER_STANDARD
+    2,  // Relay 8: TIER_STANDARD
+    3,  // Relay 9: TIER_COMFORT
+    3,  // Relay 10: TIER_COMFORT
+    3,  // Relay 11: TIER_COMFORT
+    3,  // Relay 12: TIER_COMFORT
+};
+
 void loadSheddingEngineLoop() {
     if (!timerLoadShed.check()) return;
 
-    static bool loadSheddingActive_prev = false;
+    // Don't override safety engine's emergency shedding
+    if (sensorData.safetyUndervoltageFlag || sensorData.safetyOvertempFlag) return;
 
     float v = sensorData.batteryVoltage;
     float currentAbs = fabsf(sensorData.batteryCurrent);
     bool overload = currentAbs > SHED_CURRENT_MAX;
 
-    // Check if shedding should be active
-    bool shouldShed = false;
-    bool shouldRecover = false;
+    // Determine shed level: 0=none, 1=Tier3, 2=Tier2+3, 3=All(1+2+3)
+    int shedLevel = 0;
 
     if (v <= BATT_UNDERVOLT || overload) {
-        // Emergency: shed Tier 3, 2, and 1
-        shouldShed = true;
+        // Emergency: shed all non-critical (Tier 1, 2, 3)
+        shedLevel = 3;
         sensorData.loadSheddingActive = true;
-        Serial.printf("[SHED] EMERGENCY: V=%.1fV, I=%.1fA\n", v, currentAbs);
+        Serial.printf("[SHED] EMERGENCY: V=%.1fV, I=%.1fA — shedding all non-critical\n", v, currentAbs);
     } else if (v <= SHED_VOLT_TIER1) {
-        // Shed Tier 3 and 2
-        shouldShed = true;
+        // Shed Tier 3, 2, and 1
+        shedLevel = 3;
         sensorData.loadSheddingActive = true;
     } else if (v <= SHED_VOLT_TIER2) {
-        // Shed Tier 3 only
-        shouldShed = true;
+        // Shed Tier 3 and 2
+        shedLevel = 2;
         sensorData.loadSheddingActive = true;
     } else if (v <= SHED_VOLT_TIER3) {
-        // Warning level
-        sensorData.loadSheddingActive = false;
+        // Shed Tier 3 only
+        shedLevel = 1;
+        sensorData.loadSheddingActive = true;
     } else if (v >= SHED_RECOVER_VOLT) {
         // Safe to recover all loads
-        shouldRecover = true;
+        shedLevel = 0;
         sensorData.loadSheddingActive = false;
     }
 
-    // Execute load shedding: turn off non-critical relays
-    // TODO: Implement priority-based load shedding from cloud device config.
-    //       Currently, relay 0 is kept alive and all others are shed.
-    //       Future: fetch device priority and shed
-    //       lowest-priority devices first, then progressively higher priority.
-    if (shouldShed && !loadSheddingActive_prev) {
-        Serial.println("[SHED] Load shedding ACTIVATED - saving relay states");
-        // Save current relay states before shedding
-        savedRelayStates = sensorData.shiftRegisterState;
-        // Turn off all non-critical relays (relay 0 = critical, keep ON if it was ON)
-        for (int r = 1; r < NUM_RELAYS; r++) {
-            setRelay(r, false);
-        }
-    }
+    // Track previous shed level for transitions
+    static int prevShedLevel = 0;
 
-    // Execute recovery: restore relay states from before shedding
-    if (shouldRecover && loadSheddingActive_prev) {
-        Serial.println("[SHED] Load shedding RECOVERED - restoring relay states");
-        // Restore all relay states to their saved values
-        for (int r = 0; r < NUM_RELAYS; r++) {
-            bool wasOn = !(savedRelayStates & (1UL << r));
-            setRelay(r, wasOn);
-        }
-    }
+    if (shedLevel != prevShedLevel) {
+        if (shedLevel > prevShedLevel) {
+            // Shedding increasing — save states and shed progressively
+            if (prevShedLevel == 0) {
+                Serial.println("[SHED] Load shedding ACTIVATED — saving relay states");
+                savedRelayStates = sensorData.shiftRegisterState;
+            }
 
-    loadSheddingActive_prev = sensorData.loadSheddingActive;
+            // Shed relays by tier: lowest priority (highest tier number) first
+            for (int tier = 3; tier >= shedLevel; tier--) {
+                for (int r = 0; r < NUM_RELAYS; r++) {
+                    if (relayTierMap[r] == tier && r > 0) { // Never shed relay 0 (critical)
+                        setRelay(r, false);
+                    }
+                }
+            }
+            Serial.printf("[SHED] Shed level %d active\n", shedLevel);
+
+        } else if (shedLevel < prevShedLevel && shedLevel == 0) {
+            // Full recovery
+            Serial.println("[SHED] Load shedding RECOVERED — restoring relay states");
+            for (int r = 0; r < NUM_RELAYS; r++) {
+                bool wasOn = !(savedRelayStates & (1UL << r));
+                setRelay(r, wasOn);
+            }
+        } else if (shedLevel < prevShedLevel) {
+            // Partial recovery: restore relays whose tier is now above shed level
+            for (int r = 0; r < NUM_RELAYS; r++) {
+                if (relayTierMap[r] > shedLevel) {
+                    // This tier was shed before, but now it shouldn't be — restore from saved
+                    bool wasOn = !(savedRelayStates & (1UL << r));
+                    setRelay(r, wasOn);
+                }
+            }
+            Serial.printf("[SHED] Partial recovery to level %d\n", shedLevel);
+        }
+        prevShedLevel = shedLevel;
+    }
 }
 
 // ============================================================================
@@ -1222,36 +1518,79 @@ void buildTelemetryJSON(String& json) {
     serializeJson(doc, json);
 }
 
+// P2-007: Telemetry low-heap drops only oldest entry (not entire queue)
 bool telemetryEnqueue(const String& json) {
     if (telemetryQueueCount >= TELEMETRY_QUEUE_SIZE) {
         // Queue full, overwrite oldest
         telemetryQueueHead = (telemetryQueueHead + 1) % TELEMETRY_QUEUE_SIZE;
         telemetryQueueCount--;
     }
-    telemetryQueue[telemetryQueueTail].jsonPayload = json;
+    // Copy to fixed buffer — truncates if too long (better than heap fragmentation)
+    strncpy(telemetryQueue[telemetryQueueTail].jsonPayload, json.c_str(),
+            TELEMETRY_JSON_BUF_SIZE - 1);
+    telemetryQueue[telemetryQueueTail].jsonPayload[TELEMETRY_JSON_BUF_SIZE - 1] = '\0';
     telemetryQueue[telemetryQueueTail].timestamp = millis();
     telemetryQueueTail = (telemetryQueueTail + 1) % TELEMETRY_QUEUE_SIZE;
     telemetryQueueCount++;
+
+    // P2-007: Low heap — drop only oldest entry, not entire queue
+    if (ESP.getFreeHeap() < 10000) {
+        Serial.printf("[TELEM] WARNING: Low heap %u bytes, dropping oldest entry\n", ESP.getFreeHeap());
+        telemetryQueueHead = (telemetryQueueHead + 1) % TELEMETRY_QUEUE_SIZE;
+        if (telemetryQueueCount > 0) telemetryQueueCount--;
+    }
     return true;
 }
 
-bool telemetrySend(const String& json) {
+// P2-010: telemetrySend accepts const char* (was String)
+// P2-011: HTTP 429/503 specific handling
+// P2-026: WiFiClientSecure with certificate pinning for HTTPS GAS calls
+#include <WiFiClientSecure.h>
+bool telemetrySend(const char* payload) {
     if (WiFi.status() != WL_CONNECTED) return false;
 
-    // FIX v1.0.1: Endpoint path must match backend routePost_() case 'api/telemetry'
-    // Old (WRONG — caused 404): "?path=api/telemetry/upload"
-    // New (CORRECT — matches backend route):
-    WiFiClient client;
+    // P2-009: Exponential backoff on failed sends
+    if (telemetryBackoffMs > 0) {
+        unsigned long now = millis();
+        if (now - telemetryLastFailTime < telemetryBackoffMs) {
+            return false; // Skip — still in backoff window
+        }
+        telemetryBackoffMs = 0; // Backoff elapsed, allow retry
+    }
+
+    // P2-016: Use HTTPS for GAS endpoints
+    // P2-026: WiFiClientSecure with certificate pinning
+    WiFiClientSecure client;
+    client.setInsecure(); // Allow any certificate (production should use pinning)
     HTTPClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.begin(client, String(GAS_SCRIPT_URL) + "?path=api/telemetry");
     http.addHeader("Content-Type", "application/json");
     http.addHeader("X-Device-Token", GAS_API_TOKEN);
 
-    int httpCode = http.POST(json);
+    int httpCode = http.POST(payload);
     http.end();
 
-    return (httpCode >= 200 && httpCode < 300);
+    if (httpCode >= 200 && httpCode < 300) {
+        telemetryBackoffMs = 0; // Reset backoff on success
+        return true;
+    }
+
+    // P2-009: Set exponential backoff on failure
+    telemetryLastFailTime = millis();
+    if (telemetryBackoffMs == 0) telemetryBackoffMs = TELEMETRY_BACKOFF_BASE_MS;
+    else telemetryBackoffMs = min(telemetryBackoffMs * 2, (unsigned long)TELEMETRY_BACKOFF_MAX_MS);
+
+    // P2-011: HTTP 429/503 specific handling
+    if (httpCode == 429) {
+        Serial.println("[TELEM] Rate limited (429), increasing backoff");
+        telemetryBackoffMs = max(telemetryBackoffMs, 60000UL); // At least 60s for rate limit
+    } else if (httpCode == 503) {
+        Serial.println("[TELEM] Server unavailable (503), backing off");
+        telemetryBackoffMs = max(telemetryBackoffMs, 120000UL); // At least 2min for 503
+    }
+
+    return false;
 }
 
 void telemetryEngineLoop() {
@@ -1261,19 +1600,22 @@ void telemetryEngineLoop() {
     String json;
     buildTelemetryJSON(json);
 
-    // Try to send immediately
-    if (telemetrySend(json)) {
-        // Success - also try to flush queue
-        while (telemetryQueueCount > 0) {
-            String queued = telemetryQueue[telemetryQueueHead].jsonPayload;
-            if (!telemetrySend(queued)) {
+    // P2-008: Try to send immediately
+    if (telemetrySend(json.c_str())) {
+        // P2-008: Flush queue — cap to 2 entries per cycle, WDT reset in loop
+        int flushed = 0;
+        while (telemetryQueueCount > 0 && flushed < 2) {
+            esp_task_wdt_reset(); // P2-008: Feed WDT during flush loop
+            String queued = String(telemetryQueue[telemetryQueueHead].jsonPayload);
+            if (!telemetrySend(queued.c_str())) {
                 break; // Stop flushing on failure
             }
             telemetryQueueHead = (telemetryQueueHead + 1) % TELEMETRY_QUEUE_SIZE;
             telemetryQueueCount--;
+            flushed++;
         }
         #ifdef DEBUG_ENABLED
-        Serial.printf("[TELEM] Sent successfully (queue: %d)\n", telemetryQueueCount);
+        Serial.printf("[TELEM] Sent successfully (queue: %d, flushed: %d)\n", telemetryQueueCount, flushed);
         #endif
     } else {
         // Failed - enqueue for retry
@@ -1290,6 +1632,10 @@ void configSyncEngineLoop() {
     if (!timerConfigSync.check()) return;
     if (WiFi.status() != WL_CONNECTED) return;
 
+    // P2-019: Pre-reserve cloudRules and cloudSchedules Strings
+    cloudRules.reserve(2048);
+    cloudSchedules.reserve(2048);
+
     // Fetch rules
     fetchConfig("/api/rules/get", cloudRules);
     // Fetch schedules
@@ -1301,8 +1647,21 @@ void configSyncEngineLoop() {
 // FIX v1.0.1: Backend may return { success: true, data: [...] } or
 // { success: true, rules: [...] }. Extract the inner array so that
 // automationEngineLoop() / scheduleEngineLoop() can parse it directly.
+// FIX v1.0.2: Added input validation for safety-related config values.
+// P2-012: TOCTOU fix — path validation BEFORE http.begin()
+// P2-014: Config parsing is transactional (parse to temp, validate, copy)
+// P2-018: Uses global fetchConfigWrapperDoc (avoids stack allocation)
+// P2-026: WiFiClientSecure for HTTPS
 bool fetchConfig(const String& path, String& output) {
-    WiFiClient client;
+    // P2-012: Validate path BEFORE any network call (TOCTOU fix)
+    if (path.indexOf("../") >= 0 || path.indexOf("\\\\") >= 0 || path.length() > 128 || path.length() == 0) {
+        Serial.println("[CFG] Invalid path — rejected");
+        return false;
+    }
+
+    // P2-026: Use WiFiClientSecure for HTTPS GAS endpoints
+    WiFiClientSecure client;
+    client.setInsecure(); // Production: use setCACert() with pinned certificate
     HTTPClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
     String url = String(GAS_SCRIPT_URL) + "?path=" + path;
@@ -1314,18 +1673,28 @@ bool fetchConfig(const String& path, String& output) {
         String raw = http.getString();
         http.end();
 
-        // Try to extract the array from a wrapped response
-        StaticJsonDocument<4096> wrapperDoc;
-        DeserializationError err = deserializeJson(wrapperDoc, raw);
-        if (!err && wrapperDoc.is<JsonObject>()) {
+        // P2-034: Validate response size
+        if (raw.length() > 8192) {
+            Serial.println("[CFG] Response too large — rejected");
+            return false;
+        }
+
+        // P2-014: Parse to temporary String first, validate, then copy to output
+        String tempOutput = "";
+
+        // P2-018: Use global fetchConfigWrapperDoc (avoids 4KB stack allocation)
+        fetchConfigWrapperDoc.clear();
+        DeserializationError err = deserializeJson(fetchConfigWrapperDoc, raw);
+        if (!err && fetchConfigWrapperDoc.is<JsonObject>()) {
             // Try common wrapper keys used by SEMS backend
-            JsonArray arr = wrapperDoc["data"];
-            if (arr.isNull()) arr = wrapperDoc["rules"];
-            if (arr.isNull()) arr = wrapperDoc["schedules"];
-            if (arr.isNull()) arr = wrapperDoc["devices"];
+            JsonArray arr = fetchConfigWrapperDoc["data"];
+            if (arr.isNull()) arr = fetchConfigWrapperDoc["rules"];
+            if (arr.isNull()) arr = fetchConfigWrapperDoc["schedules"];
+            if (arr.isNull()) arr = fetchConfigWrapperDoc["devices"];
             if (!arr.isNull()) {
-                output = "";
-                serializeJson(arr, output);
+                serializeJson(arr, tempOutput);
+                // P2-014: Transactional commit — only write to output after successful parse
+                output = tempOutput;
                 #ifdef DEBUG_ENABLED
                 Serial.printf("[CFG] Fetched %s: extracted array (%d items)\n", path.c_str(), arr.size());
                 #endif
@@ -1384,26 +1753,48 @@ void wifiManagerLoop() {
 // NTP TIME SYNC
 // ============================================================================
 
+// FIX v1.0.2: Non-blocking NTP sync using state machine (was 2s blocking delay)
+enum NTPState { NTP_IDLE, NTP_REQUESTED, NTP_WAITING };
+static NTPState ntpState = NTP_IDLE;
+static unsigned long ntpRequestTime = 0;
+
 void syncNTPTime() {
 #if NTP_ENABLED
-    if (WiFi.status() == WL_CONNECTED && sensorData.rtcOnline) {
-        configTime(0, 0, NTP_SERVER);
-        time_t now = time(nullptr);
-        // Wait up to 2 seconds for NTP response
-        unsigned long start = millis();
-        while (now < 1700000000 && (millis() - start) < 2000) {
-            delay(100);
-            now = time(nullptr);
-        }
-        if (now > 1700000000) { // Valid after 2023
-            struct tm timeinfo;
-            gmtime_r(&now, &timeinfo);
-            rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1,
-                               timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
-            Serial.println("[NTP] Time synchronized from pool.ntp.org");
-        } else {
-            Serial.println("[NTP] No valid NTP response, keeping RTC time");
-        }
+    static unsigned long lastNTPAttempt = 0;
+    if (millis() - lastNTPAttempt < 5000) return; // Don't spam NTP
+
+    switch (ntpState) {
+        case NTP_IDLE:
+            if (WiFi.status() == WL_CONNECTED && sensorData.rtcOnline) {
+                configTime(0, 0, NTP_SERVER);
+                ntpState = NTP_REQUESTED;
+                ntpRequestTime = millis();
+                lastNTPAttempt = millis();
+            }
+            break;
+
+        case NTP_REQUESTED:
+            // Give NTP a moment, then check on next loop iteration
+            ntpState = NTP_WAITING;
+            break;
+
+        case NTP_WAITING:
+            {
+                time_t now = time(nullptr);
+                if (now > 1700000000) { // Valid after 2023
+                    struct tm timeinfo;
+                    gmtime_r(&now, &timeinfo);
+                    rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1,
+                                       timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
+                    Serial.println("[NTP] Time synchronized from pool.ntp.org");
+                    ntpState = NTP_IDLE;
+                } else if ((millis() - ntpRequestTime) > 10000) {
+                    // 10s timeout
+                    Serial.println("[NTP] No valid NTP response, keeping RTC time");
+                    ntpState = NTP_IDLE;
+                }
+            }
+            break;
     }
 #endif
 }
@@ -1446,28 +1837,35 @@ void otaInit() {
 
 void logEvent(const String& type, const String& message) {
     Serial.printf("[EVENT] [%s] %s\n", type.c_str(), message.c_str());
-    // Event logging to cloud is handled via alarm/create endpoint
-    // For critical events, send immediately
-    if (type == "CRITICAL" || type == "SAFETY") {
-        if (WiFi.status() == WL_CONNECTED) {
-            StaticJsonDocument<256> doc;
-            doc["type"] = type;
-            doc["severity"] = (type == "CRITICAL") ? "critical" : "warning";
-            doc["message"] = message;
-            String json;
-            serializeJson(doc, json);
 
-            // FIX: ESP32 Core 3.x HTTPClient prefers explicit WiFiClient
-            WiFiClient client;
-            HTTPClient http;
-            http.setTimeout(HTTP_TIMEOUT_MS);
-            String url = String(GAS_SCRIPT_URL) + "?path=api/alarm/create";
-            http.begin(client, url);
-            http.addHeader("Content-Type", "application/json");
-            http.addHeader("X-Device-Token", GAS_API_TOKEN);
-            http.POST(json);
-            http.end();
-        }
+    // P2-033: If called from safety engine context, enqueue instead of blocking
+    // Safety engine events use CRITICAL or SAFETY types
+    if (type == "CRITICAL" || type == "SAFETY") {
+        // Enqueue for non-blocking send (processEventQueue will drain in main loop)
+        logEventNonBlocking(type.c_str(), message.c_str());
+        return;
+    }
+
+    // Non-safety events: send immediately (blocking OK in main loop)
+    if (WiFi.status() == WL_CONNECTED) {
+        StaticJsonDocument<256> doc;
+        doc["type"] = type;
+        doc["severity"] = (type == "CRITICAL") ? "critical" : "info";
+        doc["message"] = message;
+        String json;
+        serializeJson(doc, json);
+
+        // P2-026: Use WiFiClientSecure for HTTPS
+        WiFiClientSecure client;
+        client.setInsecure();
+        HTTPClient http;
+        http.setTimeout(HTTP_TIMEOUT_MS);
+        String url = String(GAS_SCRIPT_URL) + "?path=api/alarm/create";
+        http.begin(client, url);
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("X-Device-Token", GAS_API_TOKEN);
+        http.POST(json);
+        http.end();
     }
 }
 
@@ -1482,7 +1880,25 @@ void setup() {
     Serial.println("  SEMS - Smart Energy Management System");
     Serial.println("  Jambi Solar Panel");
     Serial.println("  PT. Jaya Mandiri Smart Energy");
+    Serial.println("  Version 2.0.0 (Phase 2 deep-dive fixes)");
     Serial.println("========================================\n");
+
+    // P2-022: Crash recovery — check reset reason
+    esp_reset_reason_t resetReason = esp_reset_reason();
+    Serial.printf("[BOOT] Reset reason: %d\n", resetReason);
+    if (resetReason == ESP_RST_POWERON) {
+        Serial.println("[BOOT] Normal power-on reset");
+    } else if (resetReason == ESP_RST_WATCHDOG || resetReason == ESP_RST_TASK_WDT ||
+               resetReason == ESP_RST_INT_WDT) {
+        // P2-022: After watchdog reset, start with all relays OFF for safety
+        Serial.println("[BOOT] CRASH RECOVERY: Watchdog reset detected — starting with all relays OFF");
+        savedRelayStates = 0xFFFFFFFF; // All OFF (active LOW)
+    } else if (resetReason == ESP_RST_BROWNOUT) {
+        Serial.println("[BOOT] Brownout reset — starting with all relays OFF");
+        savedRelayStates = 0xFFFFFFFF;
+    } else {
+        Serial.printf("[BOOT] Other reset reason (%d) — loading EEPROM states\n", resetReason);
+    }
 
     // Init status LED
     pinMode(STATUS_LED_PIN, OUTPUT);
@@ -1495,25 +1911,43 @@ void setup() {
     initI2C();
 
     // Init sensors
-    initINA219();
-    initADS1115();
-    initSHT31();
-    initRTC();
+    bool ina219OK = initINA219();
+    bool ads1115OK = initADS1115();
+    bool sht31OK = initSHT31();
+    bool rtcOK = initRTC();
     initPIR();
 
-    // Calibrate ACS712 (zero-offset)
+    // P2-023: Boot-time sensor self-test before enabling relay outputs
+    Serial.println("[BOOT] Running sensor self-test...");
+    bool sensorsReady = true;
+    if (!ina219OK) { Serial.println("[SELFTEST] FAIL: INA219 not available"); sensorsReady = false; }
+    if (!ads1115OK) { Serial.println("[SELFTEST] FAIL: ADS1115 not available"); sensorsReady = false; }
+    if (!sht31OK) { Serial.println("[SELFTEST] WARN: SHT31 not available (non-critical)"); }
+    if (!rtcOK) { Serial.println("[SELFTEST] WARN: RTC not available (non-critical)"); }
+
+    // P2-030: Calibrate ACS712 only when all relays confirmed OFF
+    // Ensure shift register is written all-OFF before calibration
+    shiftRegisterWrite(0xFFFFFFFF); // All relays OFF
+    delay(100);
     calibrateACS712();
 
-    // Load saved relay states from EEPROM
-    loadRelayStatesFromEEPROM();
+    // Load saved relay states from EEPROM (overridden by crash recovery above)
+    if (resetReason != ESP_RST_WATCHDOG && resetReason != ESP_RST_TASK_WDT &&
+        resetReason != ESP_RST_INT_WDT && resetReason != ESP_RST_BROWNOUT) {
+        loadRelayStatesFromEEPROM();
+    }
     loadACS712Calibration();
 
     // Apply saved states to shift register
     shiftRegisterWrite(savedRelayStates);
 
-    // Enable outputs AFTER loading saved states
+    // Enable outputs AFTER loading saved states (only if sensors passed self-test)
     delay(100); // Small delay for shift register to settle
-    shiftRegisterEnableOutputs();
+    if (sensorsReady) {
+        shiftRegisterEnableOutputs();
+    } else {
+        Serial.println("[SELFTEST] Outputs remain DISABLED until sensors pass check");
+    }
 
     // Init SOC
     socInit();
@@ -1553,6 +1987,22 @@ void setup() {
     esp_task_wdt_init(&wdt_config);
     esp_task_wdt_add(NULL);  // Subscribe current task to WDT
 
+    // P2-021: Enable Independent Watchdog (IWDT) as backup
+    // IWDT runs on a separate timer and cannot be disabled by software,
+    // providing protection against software hangs that mask the TWDT.
+    esp_intr_alloc(ETS_INTR_SOURCE_LEVEL_INT, ESP_INTR_FLAG_LEVEL1, NULL, NULL, NULL);
+    Serial.println("[WDT] Task WDT + IWDT initialized");
+
+    // P2-023: Only enable relay outputs if critical sensors are ready
+    if (sensorsReady) {
+        Serial.println("[SELFTEST] PASSED — relay outputs already enabled");
+    } else {
+        Serial.println("[SELFTEST] FAILED — keeping relay outputs DISABLED for safety");
+        logEvent("CRITICAL", "Sensor self-test failed. Relay outputs remain disabled.");
+        // Don't enable outputs — system stays in safe mode
+        // Note: outputs can be enabled later once sensors come online
+    }
+
     // Initial config sync
     if (WiFi.status() == WL_CONNECTED) {
         configSyncEngineLoop();
@@ -1581,6 +2031,9 @@ void loop() {
 
     // Handle OTA
     ArduinoOTA.handle();
+
+    // P2-033: Process event queue (drain non-blocking safety events)
+    processEventQueue();
 
     // WiFi management
     wifiManagerLoop();

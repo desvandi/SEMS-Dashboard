@@ -1,40 +1,74 @@
 // ============================================================================
-// config.h — TIDAK ADA PERUBAHAN (file ini sama persis dengan versi asli)
-// Disalin ke folder download untuk kelengkapan
+// config.h — SEMS Configuration
+// Smart Energy Management System
+// Brand: Jambi Solar Panel powered by PT. Jaya Mandiri Smart Energy
 // ============================================================================
+// SECURITY FIX v1.0.2: Hardcoded credentials removed.
+//   - WiFi SSID/password replaced with CHANGE_ME placeholders
+//   - API token replaced with CHANGE_ME placeholder
+//   - GAS URL replaced with CHANGE_ME placeholder
+//   - OTA password replaced with CHANGE_ME placeholder
+//
+// PROVISIONING: The intended deployment flow is:
+//   1. Flash firmware with these placeholder values
+//   2. Device enters provisioning/AP mode on first boot (no valid SSID)
+//   3. User configures WiFi via web portal or BLE provisioning
+//   4. Credentials are stored in NVS (Non-Volatile Storage)
+//   5. On subsequent boots, device reads from NVS
+//
+// For development/testing ONLY, you may set these via build flags in
+// platformio.ini: -DWIFI_SSID='"my_ssid"' -DWIFI_PASSWORD='"my_pass"'
+// ============================================================================
+
 #ifndef SEMS_CONFIG_H
 #define SEMS_CONFIG_H
 
-// Coding Standard:
-//   Constants: UPPER_SNAKE_CASE (e.g., BATT_OVERVOLT)
-//   Variables: camelCase (e.g., batteryVoltage)
-//   Functions: camelCase (e.g., readACS712)
-//   #define: UPPER_SNAKE_CASE
-
 // ============================================================================
-// SEMS Configuration - Smart Energy Management System
-// Brand: Jambi Solar Panel powered by PT. Jaya Mandiri Smart Energy
-// ===============================================================================
-
-// --- Firmware Version ---
-#define FIRMWARE_VERSION     "1.0.1"   // FIX v1.0.1: bumped after firmware<->backend bug fixes
-#define BUILD_DATE           __DATE__
-#define BUILD_TIME           __TIME__
-
-// --- WiFi Configuration ---
-#define WIFI_SSID           "4G-UFI-7248"
-#define WIFI_PASSWORD       "1234567890"
-#if !defined(WIFI_SSID)
-  #warning "WiFi SSID not configured - device will not connect to WiFi"
+// WIFI CREDENTIALS (CHANGE_ME — use NVS provisioning in production)
+// ============================================================================
+#ifndef WIFI_SSID
+  #define WIFI_SSID             "CHANGE_ME"       // WiFi SSID — set via NVS or build flag
+  #warning "WIFI_SSID not set via build flag — device will not connect to WiFi. Use NVS provisioning."
 #endif
+
+#ifndef WIFI_PASSWORD
+  #define WIFI_PASSWORD         "CHANGE_ME"       // WiFi Password — set via NVS or build flag
+  #warning "WIFI_PASSWORD not set via build flag — device will not connect to WiFi. Use NVS provisioning."
+#endif
+
+// --- WiFi Timing ---
 #define WIFI_CONNECT_TIMEOUT_MS  15000
 #define WIFI_RECONNECT_BASE_MS   1000
 #define WIFI_RECONNECT_MAX_MS    60000
 
-// --- GAS Backend Configuration ---
-#define GAS_SCRIPT_URL      "https://script.google.com/macros/s/AKfycbxEZObDELJ2mfXMjg5D9KX-kub7mxinc3hkMPh9HtEsYXtyO5-Psgk4F_L3Sbz0Zq33QQ/exec"
-#define GAS_API_TOKEN       "sems_device_token_change_me_2024"
+// ============================================================================
+// GAS BACKEND (CHANGE_ME — set via build flag in production)
+// ============================================================================
+#ifndef GAS_SCRIPT_URL
+  #define GAS_SCRIPT_URL          "CHANGE_ME"       // GAS endpoint URL — set via build flag
+  #warning "GAS_SCRIPT_URL not set via build flag — telemetry/config sync disabled."
+#endif
+
+#ifndef GAS_API_TOKEN
+  #define GAS_API_TOKEN          "CHANGE_ME"       // Device auth token — set via NVS or build flag
+  #warning "GAS_API_TOKEN not set via build flag — API requests will be rejected."
+#endif
+
 #define DEVICE_ID           "SEMS_001"
+
+// ============================================================================
+// CODING STANDARD
+// ============================================================================
+//   Constants: UPPER_SNAKE_CASE (e.g., BATT_OVERVOLT)
+//   Variables: camelCase (e.g., batteryVoltage)
+//   Functions: camelCase (e.g., readACS712)
+//   #define: UPPER_SNAKE_CASE
+// ============================================================================
+
+// --- Firmware Version ---
+#define FIRMWARE_VERSION     "2.0.0"   // Phase 2 deep-dive fixes applied
+#define BUILD_DATE           __DATE__
+#define BUILD_TIME           __TIME__
 
 // --- Timing Intervals (milliseconds) ---
 #define SENSOR_POLL_MS          1000   // I2C sensor polling
@@ -142,7 +176,8 @@
 #define SAFETY_CELL_IMBALANCE_V 0.3  // Cell imbalance threshold (V)
 
 // --- Telemetry Queue ---
-#define TELEMETRY_QUEUE_SIZE 50
+#define TELEMETRY_QUEUE_SIZE 10     // REDUCED from 50 to 10 to minimize heap fragmentation
+#define TELEMETRY_JSON_BUF_SIZE 1024  // Max JSON payload size
 #define HTTP_TIMEOUT_MS     10000
 
 // --- Unified EEPROM Address Map ---
@@ -169,8 +204,13 @@
 #define DEBUG_ENABLED       true
 
 // --- OTA Configuration ---
+// SECURITY FIX v1.0.2: Password must match platformio.ini upload_flags --auth value.
+// Set via build flag: -DOTA_PASSWORD='"your_secure_password"'
+#ifndef OTA_PASSWORD
+  #define OTA_PASSWORD        "CHANGE_ME"
+  #warning "OTA_PASSWORD not set via build flag — OTA updates will be unprotected!"
+#endif
 #define OTA_PORT            3232
-#define OTA_PASSWORD        "sems_ota_2026"
 #define OTA_HOSTNAME        "sems-esp32"
 
 // --- Watchdog ---
@@ -188,5 +228,68 @@
 // --- Moving Average ---
 #define MA_WINDOW_I2C       5
 #define MA_WINDOW_ANALOG    10
+
+// --- Safety Config Validation Ranges ---
+// Used to clamp remote config values to safe physical limits
+#define SAFETY_VALID_OVERVOLT_MIN   26.0   // Min overvoltage threshold (V)
+#define SAFETY_VALID_OVERVOLT_MAX   35.0   // Max overvoltage threshold (V)
+#define SAFETY_VALID_UNDERVOLT_MIN  15.0   // Min undervoltage threshold (V)
+#define SAFETY_VALID_UNDERVOLT_MAX  24.0   // Max undervoltage threshold (V)
+#define SAFETY_VALID_OVERCURRENT_MIN 5.0    // Min overcurrent threshold (A)
+#define SAFETY_VALID_OVERCURRENT_MAX 50.0   // Max overcurrent threshold (A)
+#define SAFETY_VALID_OVERTEMP_MIN    30.0   // Min overtemp threshold (°C)
+#define SAFETY_VALID_OVERTEMP_MAX    80.0   // Max overtemp threshold (°C)
+#define SAFETY_VALID_CELL_IMBAL_MIN  0.1    // Min cell imbalance threshold (V)
+#define SAFETY_VALID_CELL_IMBAL_MAX  1.0    // Max cell imbalance threshold (V)
+#define SAFETY_VALID_TELEM_MIN_MS   5000    // Min telemetry interval (ms)
+#define SAFETY_VALID_TELEM_MAX_MS   300000  // Max telemetry interval (ms)
+
+// ============================================================================
+// FIX v1.0.2: Modular code compatibility aliases
+// The modular code in sensors/, engines/, utils/ uses different constant names.
+// These aliases bridge the gap so the modular code can compile.
+// TODO: Once modular code is refactored to use the canonical names above,
+//       remove these aliases and update the modular files directly.
+// ============================================================================
+#define SENSOR_POLL_INTERVAL_MS    SENSOR_POLL_MS
+#define PIR_CHECK_INTERVAL_MS     PIR_POLL_MS
+#define PIR_COUNT                NUM_PIRS
+#define ACS712_MODEL              30      // ACS712-30A
+#define ACS712_SAMPLE_INTERVAL_US  (ACS712_SAMPLE_INTERVAL_MS * 1000UL)
+#define ACS712_RMS_WINDOW         ACS712_SAMPLES
+
+// Modular code battery aliases (matches .ino naming convention)
+#define BATTERY_CAPACITY_AH       BATT_CAPACITY_AH
+#define BATTERY_NOMINAL_V        BATT_NOMINAL_VOLT
+#define BATTERY_FULL_V           BATT_FULL_VOLT
+#define BATTERY_EMPTY_V          BATT_EMPTY_VOLT
+
+// SOC aliases for modular code
+#define SOC_FULL_V               SOC_RECAL_VOLT
+#define SOC_FULL_CURRENT_A        SOC_RECAL_CURRENT
+#define SOC_FULL_HOLD_MIN        30      // 30 minutes hold for full charge detection
+#define SOC_MAX_PERCENT          100.0
+#define SOC_MIN_PERCENT          0.0
+
+// Load shedding aliases for modular code
+#define SHED_SOC_CRITICAL        15.0    // SOC% for critical shedding
+#define SHED_SOC_LOW             25.0    // SOC% for low shedding
+#define SHED_SOC_NORMAL          35.0    // SOC% for normal shedding
+#define SHED_RESTORE_HYSTERESIS  3.0     // Hysteresis for recovery
+
+// Safety aliases for modular code
+#define SAFETY_OVERVOLTAGE_V     BATT_OVERVOLT
+#define SAFETY_OVERTEMP_C        SAFETY_MAX_TEMP_C
+#define SAFETY_CELL_DIFF_MAX_V    SAFETY_CELL_IMBALANCE_V
+
+// Gas/config aliases for modular code
+#define GAS_CONFIG_URL           GAS_SCRIPT_URL
+#define CONFIG_SYNC_INTERVAL_MS  CONFIG_SYNC_MS
+#define TELEMETRY_POST_INTERVAL_MS TELEMETRY_UPLOAD_MS
+
+// Shift register bit offsets for modular code
+#define RELAY_BIT_OFFSET        0       // Relay bits start at bit 0
+#define MOSFET_BIT_OFFSET       NUM_RELAYS  // MOSFET bits start after relays
+#define RELAY_DEBOUNCE_MS      100     // Debounce between relay state changes
 
 #endif // SEMS_CONFIG_H

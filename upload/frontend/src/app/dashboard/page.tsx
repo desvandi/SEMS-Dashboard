@@ -13,6 +13,10 @@ import { SystemHealthCard } from '@/components/dashboard/SystemHealthCard';
 import { AlertCircle, Loader2 } from 'lucide-react';
 
 export default function DashboardPage() {
+  // Fix #9: The useTelemetry hook remains the primary data source for the dashboard.
+  // React Query is available via Providers and can be used for additional
+  // background queries. The useTelemetry hook provides real-time polling
+  // which is well-suited for the main dashboard view.
   const { data, loading, error, isConnected, lastUpdated, refresh } = useTelemetry(10000);
 
   return (

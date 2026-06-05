@@ -3,6 +3,9 @@
  * ====================================
  * Handles alarm creation, listing, and acknowledgment.
  *
+ * SECURITY v1.1.0:
+ *   - User-controlled message strings are sanitized before writing to sheets
+ *
  * Endpoints:
  *   POST /api/alarm/create       — Create alarm entry (ESP32)
  *   GET  /api/alarms             — Get alarm history (Frontend)
@@ -40,6 +43,14 @@ function handleAlarmCreate_(payload, reqHeaders) {
       return { success: false, error: 'Authentication required.', code: 401 };
     }
 
+    // B-05: For user-authenticated requests, require 'write' permission
+    if (userAuth && !deviceAuth.authenticated) {
+      var perm = requirePermission_(reqHeaders, 'write');
+      if (!perm.authorized) {
+        return { success: false, error: perm.error, code: perm.code || 403 };
+      }
+    }
+
     // Validate payload
     if (!payload || !payload.type || !payload.severity || !payload.message) {
       return {
@@ -68,15 +79,18 @@ function handleAlarmCreate_(payload, reqHeaders) {
       return { success: false, error: 'alarms sheet not found', code: 500 };
     }
 
-    var alarmId = 'alm_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+    var alarmId = 'alm_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
     var timestamp = payload.timestamp || getTimestamp_();
 
+    // SECURITY: Sanitize user-controlled message to prevent formula injection
+    var sanitizedMessage = sanitizeCellValue_(String(payload.message).substring(0, 500));
+
     var alarmRow = [
-      alarmId,
+      sanitizeCellValue_(alarmId),
       timestamp,
-      payload.type,
-      payload.severity,
-      String(payload.message).substring(0, 500), // Truncate long messages
+      sanitizeCellValue_(payload.type),
+      sanitizeCellValue_(payload.severity),
+      sanitizedMessage,
       false // acknowledged = false by default
     ];
 
@@ -105,7 +119,10 @@ function handleAlarmCreate_(payload, reqHeaders) {
       alarm.notification = notification;
     }
 
-    console.log('Alarm: Created "' + payload.type + '" (' + payload.severity + '): ' + payload.message);
+    // B-10: Truncate alarm message in console log to 100 chars
+    var logMsg = String(payload.message);
+    if (logMsg.length > 100) logMsg = logMsg.substring(0, 100) + '...';
+    console.log('Alarm: Created "' + payload.type + '" (' + payload.severity + '): ' + logMsg);
 
     return {
       success: true,
@@ -254,67 +271,67 @@ function handleAlarmAcknowledge_(payload, reqHeaders) {
     try {
       lock.waitLock(TELEMETRY.LOCK_WAIT_MS);
 
-    var data = sheet.getDataRange().getValues();
-    var headers_row = data[0];
+      var data = sheet.getDataRange().getValues();
+      var headers_row = data[0];
 
-    var colId          = headers_row.indexOf('id');
-    var colTimestamp    = headers_row.indexOf('timestamp');
-    var colAcknowledged = headers_row.indexOf('acknowledged');
+      var colId          = headers_row.indexOf('id');
+      var colTimestamp    = headers_row.indexOf('timestamp');
+      var colAcknowledged = headers_row.indexOf('acknowledged');
 
-    if (colId === -1 || colAcknowledged === -1) {
-      return { success: false, error: 'Invalid alarms sheet structure', code: 500 };
-    }
-
-    var count = 0;
-
-    if (payload.acknowledge_all) {
-      // Require explicit confirmation to prevent accidental bulk acknowledge
-      if (payload.confirm !== true) {
-        return { success: false, error: 'Send confirm: true to acknowledge all alarms', code: 400 };
+      if (colId === -1 || colAcknowledged === -1) {
+        return { success: false, error: 'Invalid alarms sheet structure', code: 500 };
       }
-      // Acknowledge ALL unacknowledged alarms (with batch limit)
-      var BATCH_LIMIT = 500;
-      for (var i = 1; i < data.length && count < BATCH_LIMIT; i++) {
-        var isAck = data[i][colAcknowledged];
-        if (isAck !== true && isAck !== 'true') {
-          sheet.getRange(i + 1, colAcknowledged + 1).setValue(true);
-          count++;
+
+      var count = 0;
+
+      if (payload.acknowledge_all) {
+        // Require explicit confirmation to prevent accidental bulk acknowledge
+        if (payload.confirm !== true) {
+          return { success: false, error: 'Send confirm: true to acknowledge all alarms', code: 400 };
         }
-      }
-    } else {
-      // Acknowledge specific alarms by ID (match by 'id' column, fallback to timestamp)
-      var ids = [];
-
-      if (payload.ids && Array.isArray(payload.ids)) {
-        ids = payload.ids;
-      } else if (payload.id) {
-        ids = [payload.id];
-      }
-
-      if (ids.length === 0) {
-        return { success: false, error: 'No alarm IDs provided', code: 400 };
-      }
-
-      for (var j = 1; j < data.length; j++) {
-        var rowId = String(data[j][colId]);
-        var rowTs = String(data[j][colTimestamp]);
-        for (var k = 0; k < ids.length; k++) {
-          if (rowId === String(ids[k]) || rowTs === String(ids[k])) {
-            sheet.getRange(j + 1, colAcknowledged + 1).setValue(true);
+        // Acknowledge ALL unacknowledged alarms (with batch limit)
+        var BATCH_LIMIT = 500;
+        for (var i = 1; i < data.length && count < BATCH_LIMIT; i++) {
+          var isAck = data[i][colAcknowledged];
+          if (isAck !== true && isAck !== 'true') {
+            sheet.getRange(i + 1, colAcknowledged + 1).setValue(true);
             count++;
-            break;
+          }
+        }
+      } else {
+        // Acknowledge specific alarms by ID (match by 'id' column, fallback to timestamp)
+        var ids = [];
+
+        if (payload.ids && Array.isArray(payload.ids)) {
+          ids = payload.ids;
+        } else if (payload.id) {
+          ids = [payload.id];
+        }
+
+        if (ids.length === 0) {
+          return { success: false, error: 'No alarm IDs provided', code: 400 };
+        }
+
+        for (var j = 1; j < data.length; j++) {
+          var rowId = String(data[j][colId]);
+          var rowTs = String(data[j][colTimestamp]);
+          for (var k = 0; k < ids.length; k++) {
+            if (rowId === String(ids[k]) || rowTs === String(ids[k])) {
+              sheet.getRange(j + 1, colAcknowledged + 1).setValue(true);
+              count++;
+              break;
+            }
           }
         }
       }
-    }
 
-    console.log('Alarms: User "' + auth.user.username + '" acknowledged ' + count + ' alarm(s)');
+      console.log('Alarms: User "' + auth.user.username + '" acknowledged ' + count + ' alarm(s)');
 
-    return {
-      success: true,
-      message: count + ' alarm(s) acknowledged',
-      acknowledged: count
-    };
+      return {
+        success: true,
+        message: count + ' alarm(s) acknowledged',
+        acknowledged: count
+      };
 
     } catch (lockError) {
       return { success: false, error: 'Server busy. Could not acquire lock.', code: 503 };

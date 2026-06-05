@@ -6,10 +6,10 @@
  * GAS Web Apps redirect from script.google.com to script.googleusercontent.com,
  * which causes custom headers (X-Auth-Token, X-Device-Token) to be lost.
  *
- * Solution: The proxy (route.ts) passes auth tokens as BOTH a header AND a
- * query parameter. Headers are preferred (no token in URLs/logs) but the query
- * param fallback ensures the token survives the 302 redirect. The backend
- * (Code.gs getHeaders_) reads headers first, then falls back to query params.
+ * NOTE (Fix #1): Auth tokens are NO LONGER sent as URL query parameters.
+ * Tokens are sent only via headers. The GAS 302 redirect may strip headers,
+ * which is an accepted limitation mitigated by IP restriction on the GAS deploy.
+ * For POST requests, the token is included in the request body instead.
  */
 
 export interface GasFetchOptions extends RequestInit {

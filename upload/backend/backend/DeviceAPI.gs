@@ -235,71 +235,71 @@ function handleDevicesControl_(payload, reqHeaders) {
     try {
       lock.waitLock(TELEMETRY.LOCK_WAIT_MS);
 
-    var ss = getSpreadsheet_();
-    var sheet = ss.getSheetByName(SHEET.DEVICES);
+      var ss = getSpreadsheet_();
+      var sheet = ss.getSheetByName(SHEET.DEVICES);
 
-    if (!sheet) {
-      return { success: false, error: 'Devices sheet not found', code: 500 };
-    }
-
-    var data = sheet.getDataRange().getValues();
-    var headers_row = data[0];
-
-    var colId          = headers_row.indexOf('id');
-    var colState       = headers_row.indexOf('state');
-    var colMode        = headers_row.indexOf('mode');
-    var colLastChanged = headers_row.indexOf('last_changed');
-
-    if (colId === -1 || colState === -1) {
-      return { success: false, error: 'Invalid devices sheet structure', code: 500 };
-    }
-
-    var found = false;
-    var updatedDevice = null;
-
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][colId]) === String(payload.id)) {
-        // Check if device is in manual or hybrid mode
-        var deviceMode = colMode !== -1 ? String(data[i][colMode]) : '';
-        if (deviceMode === 'automatic' || deviceMode === 'schedule') {
-          // Allow control but warn
-          console.log('Devices: User ' + auth.user.username + ' controlling automatic device ' + payload.id);
-        }
-
-        // Update state
-        var newState = payload.state !== undefined ? (parseInt(payload.state) || 0) : data[i][colState];
-        sheet.getRange(i + 1, colState + 1).setValue(newState);
-        sheet.getRange(i + 1, colLastChanged + 1).setValue(getTimestamp_());
-
-        // Build updated device object
-        updatedDevice = {};
-        for (var j = 0; j < headers_row.length; j++) {
-          updatedDevice[headers_row[j]] = data[i][j];
-        }
-        updatedDevice.state = newState;
-        updatedDevice.last_changed = getTimestamp_();
-
-        found = true;
-        break;
+      if (!sheet) {
+        return { success: false, error: 'Devices sheet not found', code: 500 };
       }
-    }
 
-    if (!found) {
-      return { success: false, error: 'Device not found: ' + payload.id, code: 404 };
-    }
+      var data = sheet.getDataRange().getValues();
+      var headers_row = data[0];
 
-    // Invalidate devices cache
-    CacheService.getScriptCache().remove(CACHE.DEVICES_CACHE_KEY);
+      var colId          = headers_row.indexOf('id');
+      var colState       = headers_row.indexOf('state');
+      var colMode        = headers_row.indexOf('mode');
+      var colLastChanged = headers_row.indexOf('last_changed');
 
-    // Log control action
-    console.log('Devices: User "' + auth.user.username + '" (role: ' + auth.user.role +
-                ') set device "' + payload.id + '" to state ' + (updatedDevice.state));
+      if (colId === -1 || colState === -1) {
+        return { success: false, error: 'Invalid devices sheet structure', code: 500 };
+      }
 
-    return {
-      success: true,
-      message: 'Device control command recorded',
-      device: updatedDevice
-    };
+      var found = false;
+      var updatedDevice = null;
+
+      for (var i = 1; i < data.length; i++) {
+        if (String(data[i][colId]) === String(payload.id)) {
+          // Check if device is in manual or hybrid mode
+          var deviceMode = colMode !== -1 ? String(data[i][colMode]) : '';
+          if (deviceMode === 'automatic' || deviceMode === 'schedule') {
+            // Allow control but warn
+            console.log('Devices: User ' + auth.user.username + ' controlling automatic device ' + payload.id);
+          }
+
+          // Update state
+          var newState = payload.state !== undefined ? (parseInt(payload.state) || 0) : data[i][colState];
+          sheet.getRange(i + 1, colState + 1).setValue(newState);
+          sheet.getRange(i + 1, colLastChanged + 1).setValue(getTimestamp_());
+
+          // Build updated device object
+          updatedDevice = {};
+          for (var j = 0; j < headers_row.length; j++) {
+            updatedDevice[headers_row[j]] = data[i][j];
+          }
+          updatedDevice.state = newState;
+          updatedDevice.last_changed = getTimestamp_();
+
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        return { success: false, error: 'Device not found: ' + payload.id, code: 404 };
+      }
+
+      // Invalidate devices cache
+      CacheService.getScriptCache().remove(CACHE.DEVICES_CACHE_KEY);
+
+      // Log control action
+      console.log('Devices: User "' + auth.user.username + '" (role: ' + auth.user.role +
+                  ') set device "' + payload.id + '" to state ' + (updatedDevice.state));
+
+      return {
+        success: true,
+        message: 'Device control command recorded',
+        device: updatedDevice
+      };
 
     } catch (lockError) {
       return { success: false, error: 'Server busy. Could not acquire lock.', code: 503 };
@@ -372,7 +372,8 @@ function handleDeviceRename_(payload, reqHeaders) {
 
       for (var i = 1; i < data.length; i++) {
         if (String(data[i][colId]) === String(payload.id)) {
-          sheet.getRange(i + 1, colName + 1).setValue(newName);
+          // SECURITY: Sanitize user-controlled string to prevent formula injection
+          sheet.getRange(i + 1, colName + 1).setValue(sanitizeCellValue_(newName));
 
           updatedDevice = {};
           for (var j = 0; j < headers_row.length; j++) {

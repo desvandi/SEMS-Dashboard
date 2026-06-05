@@ -1,17 +1,29 @@
 'use client';
 
-import { SessionProvider } from 'next-auth/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ThemeProvider } from 'next-themes';
-import { TokenSync } from '@/components/TokenSync';
-import { type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 
 export function Providers({ children }: { children: ReactNode }) {
+  // Fix #9: React Query client (also Fix #10: removed SessionProvider and TokenSync)
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 15 * 1000, // 15 seconds
+            retry: 2,
+            refetchOnWindowFocus: false,
+          },
+        },
+      })
+  );
+
   return (
-    <SessionProvider>
+    <QueryClientProvider client={queryClient}>
       <ThemeProvider attribute="class" defaultTheme="dark" disableTransitionOnChange>
-        <TokenSync />
         {children}
       </ThemeProvider>
-    </SessionProvider>
+    </QueryClientProvider>
   );
 }

@@ -144,6 +144,9 @@ bool EventLogger::syncToCloud() {
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
 
+    // P2-036: Add X-Device-Token header for cloud sync authentication
+    http.addHeader("X-Device-Token", _deviceID.c_str());
+
     int httpCode = http.POST(json);
     http.end();
 

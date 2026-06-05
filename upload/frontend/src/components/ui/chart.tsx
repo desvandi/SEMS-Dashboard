@@ -47,7 +47,9 @@ function ChartContainer({
   >["children"]
 }) {
   const uniqueId = React.useId()
-  const chartId = `chart-${id || uniqueId.replace(/:/g, "")}`
+  // P2-XSS-01: Sanitize id prop to prevent XSS via CSS injection
+  const safeId = id ? id.replace(/[^a-zA-Z0-9_-]/g, '') : undefined;
+  const chartId = `chart-${safeId || uniqueId.replace(/:/g, "")}`
 
   return (
     <ChartContext.Provider value={{ config }}>

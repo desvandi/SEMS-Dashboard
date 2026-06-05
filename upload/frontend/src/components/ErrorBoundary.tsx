@@ -46,14 +46,13 @@ export class ErrorBoundary extends Component<Props, State> {
               <AlertTriangle className="w-8 h-8 text-red-400" />
             </div>
             <h3 className="text-lg font-semibold mb-2">Terjadi Kesalahan</h3>
-            <p className="text-sm text-muted-foreground mb-2">
+            <p className="text-sm text-muted-foreground mb-4">
               Komponen mengalami error yang tidak terduga.
             </p>
-            {this.state.error && (
-              <p className="text-xs text-muted-foreground bg-muted/30 rounded-lg p-3 mb-4 font-mono break-all text-left">
-                {this.state.error.message}
-              </p>
-            )}
+            {/* P2-XSS-02: Show generic message instead of raw error.message */}
+            <p className="text-xs text-muted-foreground bg-muted/30 rounded-lg p-3 mb-4 font-mono break-all text-left">
+              Terjadi kesalahan internal. Silakan coba lagi atau hubungi administrator.
+            </p>
             <div className="flex flex-col sm:flex-row gap-2 justify-center">
               <Button
                 variant="outline"

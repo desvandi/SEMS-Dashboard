@@ -1,6 +1,11 @@
 /**
  * @file SHT31Sensor.cpp
  * @brief SHT31 temperature/humidity sensor implementation
+ *
+ * FIX v1.0.2: Fixed filter index desynchronization between temperature and humidity.
+ *   Temperature used _filterIndex (post-increment) while humidity used a separate
+ *   index calculation (_filterIndex - 1). Now both use a single shared
+ *   _filterIndex with sequential writes.
  */
 
 #include "SHT31Sensor.h"
@@ -89,15 +94,16 @@ bool SHT31Sensor::read() {
 
 // ============================================================================
 // MOVING AVERAGE FILTER
+// FIX v1.0.2: Both temperature and humidity now use the same shared _filterIndex.
+//   Temperature is written first, then humidity at the same index position.
+//   The index is advanced once after both are written.
 // ============================================================================
 
 float SHT31Sensor::filterTemperature(float newReading) {
     _tempBuffer[_filterIndex] = newReading;
-    _filterIndex = (_filterIndex + 1) % FILTER_SIZE;
-    if (_filterIndex == 0) _filterFilled = true;
-
+    // NOTE: Do NOT increment _filterIndex here — humidity writes to same slot first
     float sum = 0.0f;
-    int count = _filterFilled ? FILTER_SIZE : _filterIndex;
+    int count = _filterFilled ? FILTER_SIZE : (_filterIndex + 1);
     for (int i = 0; i < count; i++) {
         sum += _tempBuffer[i];
     }
@@ -105,8 +111,10 @@ float SHT31Sensor::filterTemperature(float newReading) {
 }
 
 float SHT31Sensor::filterHumidity(float newReading) {
-    // Use a separate index tracking for humidity (shares filter index with temp)
-    _humBuffer[(_filterIndex > 0 ? _filterIndex - 1 : FILTER_SIZE - 1)] = newReading;
+    // FIX v1.0.2: Write humidity at the same index as temperature, then advance
+    _humBuffer[_filterIndex] = newReading;
+    _filterIndex = (_filterIndex + 1) % FILTER_SIZE;
+    if (_filterIndex == 0) _filterFilled = true;
 
     float sum = 0.0f;
     int count = _filterFilled ? FILTER_SIZE : _filterIndex;

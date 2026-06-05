@@ -104,8 +104,8 @@ function setupDevicesSheet_(ss) {
   for (var i = 0; i < DEFAULT_DEVICES.length; i++) {
     var dev = DEFAULT_DEVICES[i];
     sheet.appendRow([
-      dev.id,
-      dev.name,
+      sanitizeCellValue_(dev.id),
+      sanitizeCellValue_(dev.name),
       dev.type,
       dev.channel,
       dev.priority,
@@ -227,11 +227,11 @@ function setupRulesSheet_(ss) {
   for (var i = 0; i < exampleRules.length; i++) {
     var rule = exampleRules[i];
     sheet.appendRow([
-      rule.id,
+      sanitizeCellValue_(rule.id),
       rule.enabled,
-      rule.target,
+      sanitizeCellValue_(rule.target),
       rule.logic,
-      safeStringify_(rule.conditions),
+      sanitizeCellValue_(safeStringify_(rule.conditions)),
       rule.action,
       rule.priority,
       now,
@@ -288,8 +288,9 @@ function setupSchedulesSheet_(ss) {
   for (var i = 0; i < examples.length; i++) {
     var sch = examples[i];
     sheet.appendRow([
-      sch.id, sch.enabled, sch.target, sch.action, sch.time,
-      safeStringify_(sch.days), sch.type, sch.date, now
+      sanitizeCellValue_(sch.id), sch.enabled, sanitizeCellValue_(sch.target),
+      sch.action, sch.time,
+      sanitizeCellValue_(safeStringify_(sch.days)), sch.type, sanitizeCellValue_(sch.date), now
     ]);
   }
 
@@ -298,6 +299,7 @@ function setupSchedulesSheet_(ss) {
 
 /**
  * Setup users sheet with default admin user.
+ * SECURITY v1.1.0: Sets must_change_password=true for default accounts.
  */
 function setupUsersSheet_(ss) {
   var sheetName = SHEET.USERS;
@@ -306,8 +308,22 @@ function setupUsersSheet_(ss) {
   if (!sheet) return 'FAILED: Could not create ' + sheetName;
 
   var data = sheet.getDataRange().getValues();
-  if (data.length > 0 && data[0][0] === 'id' && data.length > 1) {
-    return 'OK: ' + sheetName + ' already exists with ' + (data.length - 1) + ' user(s)';
+
+  // SECURITY: If sheet exists but doesn't have the must_change_password column, migrate it
+  if (data.length > 0 && data[0][0] === 'id') {
+    var existingHeaders = data[0];
+    if (existingHeaders.indexOf('must_change_password') === -1) {
+      // Migration: add the missing column header
+      sheet.getRange(1, existingHeaders.length + 1).setValue('must_change_password');
+      // Set must_change_password=true for all existing users (force password reset)
+      for (var m = 1; m < data.length; m++) {
+        sheet.getRange(m + 1, existingHeaders.length + 1).setValue(true);
+      }
+      console.log('Security: Migrated users sheet — added must_change_password column');
+    }
+    if (data.length > 1) {
+      return 'OK: ' + sheetName + ' already exists with ' + (data.length - 1) + ' user(s)';
+    }
   }
 
   sheet.clear();
@@ -315,7 +331,7 @@ function setupUsersSheet_(ss) {
   formatHeaderRow_(sheet, USERS_HEADERS.length);
 
   // Create default admin user
-  // IMPORTANT: Change the default password immediately after initial setup!
+  // SECURITY: must_change_password=true forces password change on first login
   var now = getTimestamp_();
   var adminPasswordHash = getDefaultAdminPasswordHash_();
 
@@ -325,11 +341,12 @@ function setupUsersSheet_(ss) {
     adminPasswordHash,
     USER_ROLE.ADMIN,
     now,
-    true
+    true,   // active
+    true    // SECURITY: must_change_password = true (default credentials)
   ]);
 
   // Create default technician user
-  // IMPORTANT: Change the default password immediately after initial setup!
+  // SECURITY: must_change_password=true forces password change on first login
   var techPasswordHash = hashPassword_(DEFAULT_ADMIN_PASSWORD || 'changeme_immediately');
 
   sheet.appendRow([
@@ -338,10 +355,11 @@ function setupUsersSheet_(ss) {
     techPasswordHash,
     USER_ROLE.TECHNICIAN,
     now,
-    true
+    true,   // active
+    true    // SECURITY: must_change_password = true (default credentials)
   ]);
 
-  return 'OK: ' + sheetName + ' created with 2 default users';
+  return 'OK: ' + sheetName + ' created with 2 default users (must_change_password=true)';
 }
 
 /**
@@ -388,9 +406,9 @@ function setupConfigurationsSheet_(ss) {
   for (var i = 0; i < DEFAULT_CONFIGS.length; i++) {
     var cfg = DEFAULT_CONFIGS[i];
     sheet.appendRow([
-      cfg.key,
-      cfg.value,
-      cfg.description,
+      sanitizeCellValue_(cfg.key),
+      sanitizeCellValue_(cfg.value),
+      sanitizeCellValue_(cfg.description),
       now
     ]);
   }

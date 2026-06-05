@@ -140,7 +140,8 @@ private:
 
     // ACS712 continuous sampling control
     unsigned long _lastACSSample;
-    static const unsigned long ACS_SAMPLE_INTERVAL_US = ACS712_SAMPLE_INTERVAL_US;
+    // FIX v1.0.2: ACS712_SAMPLE_INTERVAL_US was undefined. Derive from config.h's ACS712_SAMPLE_INTERVAL_MS.
+    static const unsigned long ACS_SAMPLE_INTERVAL_US = (ACS712_SAMPLE_INTERVAL_MS * 1000UL);  // 1ms → 1000µs
 
     /**
      * @brief Aggregate all sensor data into SensorSystemState.

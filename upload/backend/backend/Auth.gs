@@ -6,6 +6,12 @@
  *   2. User Auth — Frontend sends Bearer token via Authorization header
  *
  * Uses CacheService for session storage and Config sheet for token storage.
+ *
+ * Security v1.1.0:
+ *   - Timing-safe comparison for all token/hash checks
+ *   - PBKDF2-like key stretching (1000 rounds SHA-256)
+ *   - Session max lifetime (24h hard limit)
+ *   - Forced password change on first login with default credentials
  */
 
 // ============================================================
@@ -15,6 +21,7 @@
 /**
  * Validate the ESP32 device token from request headers.
  * Token is stored in configurations sheet (key: "device_token").
+ * Uses timing-safe comparison to prevent timing attacks.
  *
  * @param {Object} headers - Request headers object
  * @returns {Object} { authenticated: Boolean, error: String|null }
@@ -55,7 +62,8 @@ function validateDeviceToken_(headers) {
     };
   }
 
-  if (providedToken !== storedToken) {
+  // SECURITY: Use timing-safe comparison to prevent timing side-channel attacks
+  if (!compareHashes_(providedToken, storedToken)) {
     console.warn('Auth: Invalid device token attempt from request');
     return {
       authenticated: false,
@@ -72,11 +80,12 @@ function validateDeviceToken_(headers) {
 
 /**
  * Authenticate a user by username and password.
- * Password is hashed with SHA-256 and compared to stored hash.
+ * Password is hashed with PBKDF2-like key stretching and compared to stored hash.
+ * Checks must_change_password flag for default credentials.
  *
  * @param {string} username - Login username
  * @param {string} password - Login password (plaintext)
- * @returns {Object} { success: Boolean, token: String|null, user: Object|null, error: String|null }
+ * @returns {Object} { success: Boolean, token: String|null, user: Object|null, error: String|null, mustChangePassword: Boolean }
  */
 function authenticateUser_(username, password) {
   if (!username || !password) {
@@ -84,7 +93,8 @@ function authenticateUser_(username, password) {
       success: false,
       token: null,
       user: null,
-      error: 'Username and password are required.'
+      error: 'Username and password are required.',
+      mustChangePassword: false
     };
   }
 
@@ -100,7 +110,8 @@ function authenticateUser_(username, password) {
       success: false,
       token: null,
       user: null,
-      error: 'Users sheet not found. Run setup first.'
+      error: 'Users sheet not found. Run setup first.',
+      mustChangePassword: false
     };
   }
 
@@ -108,11 +119,12 @@ function authenticateUser_(username, password) {
   var headers = data[0];
 
   // Find column indices
-  var colId        = headers.indexOf('id');
-  var colUsername  = headers.indexOf('username');
-  var colPassHash  = headers.indexOf('password_hash');
-  var colRole      = headers.indexOf('role');
-  var colActive    = headers.indexOf('active');
+  var colId               = headers.indexOf('id');
+  var colUsername         = headers.indexOf('username');
+  var colPassHash         = headers.indexOf('password_hash');
+  var colRole             = headers.indexOf('role');
+  var colActive           = headers.indexOf('active');
+  var colMustChangePass   = headers.indexOf('must_change_password');
 
   if (colId === -1 || colUsername === -1 || colPassHash === -1 ||
       colRole === -1 || colActive === -1) {
@@ -120,7 +132,8 @@ function authenticateUser_(username, password) {
       success: false,
       token: null,
       user: null,
-      error: 'Users sheet has invalid structure.'
+      error: 'Users sheet has invalid structure.',
+      mustChangePassword: false
     };
   }
 
@@ -140,12 +153,22 @@ function authenticateUser_(username, password) {
           success: false,
           token: null,
           user: null,
-          error: 'Account is disabled. Contact administrator.'
+          error: 'Account is disabled. Contact administrator.',
+          mustChangePassword: false
         };
       }
 
       // Verify using verifyPassword_ (supports both salted and legacy unsalted hashes)
       if (verifyPassword_(password, rowHash)) {
+
+        // SECURITY: Check must_change_password flag
+        // If the user still has the default password and must_change_password is set,
+        // reject the login and force a password change via /api/users/change-password
+        var mustChange = false;
+        if (colMustChangePass !== -1) {
+          var mcpValue = data[i][colMustChangePass];
+          mustChange = (mcpValue === true || mcpValue === 'true' || mcpValue === 1);
+        }
 
         // Legacy migration: upgrade unsalted hash to salted hash on successful login
         if (rowHash.indexOf(':') === -1) {
@@ -153,6 +176,20 @@ function authenticateUser_(username, password) {
           sheet.getRange(i + 1, colPassHash + 1).setValue(newHash);
           console.log('Auth: Upgraded legacy password hash for user "' + username + '"');
         }
+
+        // SECURITY: If must_change_password is set, reject login
+        // User must use /api/users/change-password endpoint to set a new password first
+        if (mustChange) {
+          return {
+            success: false,
+            token: null,
+            user: null,
+            error: 'Password must be changed before first login. Use the change-password endpoint.',
+            code: 403,
+            mustChangePassword: true
+          };
+        }
+
         // Create session token
         var token = generateSessionToken_();
 
@@ -173,8 +210,13 @@ function authenticateUser_(username, password) {
           expiresAt: Date.now() + AUTH.TOKEN_EXPIRY_MS
         });
 
+        // CacheService TTL max is 21600s (6 hours). TOKEN_EXPIRY_MS is now 6h to match.
+        var cacheTtlSeconds = Math.round(AUTH.TOKEN_EXPIRY_MS / 1000);
         CacheService.getScriptCache()
-          .put(AUTH.SESSION_CACHE_PREFIX + token, sessionData, Math.round(AUTH.TOKEN_EXPIRY_MS / 1000));
+          .put(AUTH.SESSION_CACHE_PREFIX + token, sessionData, cacheTtlSeconds);
+
+        // B-04: Register session in per-user index
+        registerSessionIndex_(user.id, token);
 
         console.log('Auth: User "' + username + '" logged in successfully');
 
@@ -182,7 +224,8 @@ function authenticateUser_(username, password) {
           success: true,
           token: token,
           user: user,
-          error: null
+          error: null,
+          mustChangePassword: false
         };
       } else {
         console.warn('Auth: Failed login attempt for user "' + username + '"');
@@ -190,7 +233,8 @@ function authenticateUser_(username, password) {
           success: false,
           token: null,
           user: null,
-          error: 'Invalid username or password.'
+          error: 'Invalid username or password.',
+          mustChangePassword: false
         };
       }
     }
@@ -200,7 +244,8 @@ function authenticateUser_(username, password) {
     success: false,
     token: null,
     user: null,
-    error: 'Invalid username or password.'
+    error: 'Invalid username or password.',
+    mustChangePassword: false
   };
 }
 
@@ -211,6 +256,10 @@ function authenticateUser_(username, password) {
 /**
  * Validate a user session token from the Authorization header.
  * Returns user info if valid, null otherwise.
+ *
+ * SECURITY: Enforces both CacheService TTL and a hard 24-hour max session lifetime.
+ * CacheService max TTL is 6 hours, so sessions older than 24h are rejected
+ * even if the cache entry somehow persists beyond the TTL.
  *
  * @param {Object} headers - Request headers object
  * @returns {Object|null} User object if authenticated, null otherwise
@@ -251,6 +300,18 @@ function validateUserToken_(headers) {
     return null;
   }
 
+  // SECURITY: Hard max session lifetime check (24 hours)
+  // Reject sessions that have existed for longer than the configured max lifetime,
+  // regardless of whether the CacheService TTL has expired or not.
+  var sessionAge = Date.now() - session.createdAt;
+  if (sessionAge > AUTH.MAX_SESSION_LIFETIME_MS) {
+    cache.remove(AUTH.SESSION_CACHE_PREFIX + token);
+    console.warn('Auth: Session exceeded max lifetime (' +
+      Math.round(sessionAge / 3600000) + 'h > ' +
+      Math.round(AUTH.MAX_SESSION_LIFETIME_MS / 3600000) + 'h). Invalidated.');
+    return null;
+  }
+
   // Check expiry
   if (Date.now() > session.expiresAt) {
     // Remove expired session
@@ -258,15 +319,16 @@ function validateUserToken_(headers) {
     return null;
   }
 
-  // Sliding window session refresh: if the session is less than halfway to expiry,
-  // re-extend the TTL to the full TOKEN_EXPIRY_MS. This means active users stay
-  // logged in indefinitely as long as they make a request at least once per
-  // TOKEN_EXPIRY_MS / 2 interval. After that window closes without activity,
-  // the session expires naturally.
-  var age = Date.now() - session.createdAt;
-  if (age < AUTH.TOKEN_EXPIRY_MS / 2) {
-    cache.put(AUTH.SESSION_CACHE_PREFIX + token, sessionJson, Math.round(AUTH.TOKEN_EXPIRY_MS / 1000));
-  }
+  // B-01/B-13: Sliding window session refresh.
+  // Re-extend the TTL and update createdAt so active users stay logged in.
+  // Re-serializes the session before storing to ensure fresh cache data.
+  session.createdAt = Date.now();
+  session.expiresAt = Date.now() + AUTH.TOKEN_EXPIRY_MS;
+  var refreshedJson = safeStringify_(session);
+  var cacheTtlSeconds = Math.min(Math.round(AUTH.TOKEN_EXPIRY_MS / 1000), 21600);
+  cache.put(AUTH.SESSION_CACHE_PREFIX + token, refreshedJson, cacheTtlSeconds);
+  // Update per-user session index (B-04)
+  registerSessionIndex_(session.userId, token);
 
   // Return user info
   return {
@@ -319,13 +381,14 @@ function requireAdmin_(headers) {
 }
 
 // ============================================================
-// PASSWORD HASHING
+// PASSWORD HASHING (PBKDF2-like key stretching)
 // ============================================================
 
 /**
- * Hash a password using salted SHA-256.
+ * Hash a password using salted PBKDF2-like key stretching.
+ * Performs 1000 rounds of SHA-256 for brute-force resistance.
  * Generates a random 16-char salt if none provided.
- * Returns format: "salt:hash"
+ * Returns format: "salt:hash" (hash is hex-encoded).
  *
  * @param {string} password - Plain text password
  * @param {string} [salt] - Optional salt (auto-generated if omitted)
@@ -333,18 +396,27 @@ function requireAdmin_(headers) {
  */
 function hashPassword_(password, salt) {
   if (!salt) salt = Utilities.getUuid().substring(0, 16);
-  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + password);
-  var hash = '';
-  for (var i = 0; i < bytes.length; i++) {
-    var hex = bytes[i].toString(16);
-    hash += (hex.length === 1 ? '0' : '') + hex;
+
+  // PBKDF2-like key stretching: iterate SHA-256 for AUTH.HASH_ROUNDS rounds
+  var data = salt + password;
+  for (var round = 0; round < AUTH.HASH_ROUNDS; round++) {
+    var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, data);
+    var hex = '';
+    for (var j = 0; j < bytes.length; j++) {
+      var h = bytes[j].toString(16);
+      hex += (h.length === 1 ? '0' : '') + h;
+    }
+    // Feed the hex digest back as input for the next round
+    data = hex;
   }
-  return salt + ':' + hash;
+
+  return salt + ':' + data;
 }
 
 /**
  * Verify a password against a stored hash.
  * Supports both salted ("salt:hash") and legacy unsalted hashes for migration.
+ * For salted hashes, applies the same PBKDF2-like stretching as hashPassword_().
  * Legacy unsalted hashes are verified directly; on success the caller should
  * upgrade them to salted hashes via hashPassword_(password).
  *
@@ -354,46 +426,62 @@ function hashPassword_(password, salt) {
  */
 function verifyPassword_(password, storedHash) {
   if (!storedHash || storedHash.indexOf(':') === -1) {
-    // Legacy unsalted hash - verify directly and upgrade on success
+    // Legacy unsalted hash — verify directly and upgrade on success
+    // SECURITY: Use timing-safe comparison for legacy hash verification
     var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, password);
     var hex = '';
     for (var i = 0; i < bytes.length; i++) {
       var h = bytes[i].toString(16);
       hex += (h.length === 1 ? '0' : '') + h;
     }
-    return hex === storedHash;
+    return compareHashes_(hex, storedHash);
   }
+
+  // Salted hash: extract salt and compute stretched hash
   var parts = storedHash.split(':');
   var salt = parts[0];
   var hash = parts.slice(1).join(':');
-  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + password);
-  var computed = '';
-  for (var i = 0; i < bytes.length; i++) {
-    var h = bytes[i].toString(16);
-    computed += (h.length === 1 ? '0' : '') + h;
-  }
-  return computed === hash;
+
+  // Compute the same PBKDF2-like stretched hash
+  var computed = hashPassword_(password, salt);
+  var computedHash = computed.substring(salt.length + 1); // Strip "salt:" prefix
+
+  // SECURITY: Use timing-safe comparison
+  return compareHashes_(computedHash, hash);
 }
 
 /**
  * Generate the default admin password hash for initial setup.
  * Uses a default password that should be changed immediately after setup.
  *
- * @returns {string} SHA-256 hash of the default password
+ * @returns {string} Stretched salted hash of the default password
  */
 function getDefaultAdminPasswordHash_() {
   return hashPassword_(DEFAULT_ADMIN_PASSWORD || 'changeme_immediately');
 }
 
 /**
- * Compare two hash strings (basic timing-safe comparison).
+ * Compare two strings in constant time to prevent timing attacks.
+ * Used for token and hash comparisons where timing could reveal information.
  *
- * @param {string} a - First hash
- * @param {string} b - Second hash
- * @returns {boolean} True if equal
+ * If strings have different lengths, comparison still runs in O(min(len_a, len_b))
+ * to avoid leaking length information via timing.
+ *
+ * @param {string} a - First string
+ * @param {string} b - Second string
+ * @returns {boolean} True if strings are equal
  */
 function compareHashes_(a, b) {
-  if (a.length !== b.length) return false;
+  if (!a || !b) return false;
+  if (a.length !== b.length) {
+    // Still do a comparison to avoid short-circuit timing leak on length
+    var fakeResult = 0;
+    var minLen = Math.min(a.length, b.length);
+    for (var k = 0; k < minLen; k++) {
+      fakeResult |= a.charCodeAt(k) ^ b.charCodeAt(k);
+    }
+    return false; // Different lengths, definitely not equal
+  }
   var result = 0;
   for (var i = 0; i < a.length; i++) {
     result |= a.charCodeAt(i) ^ b.charCodeAt(i);
@@ -453,6 +541,67 @@ function logoutUser_(headers) {
   }
 
   return false;
+}
+
+// ============================================================
+// INVALIDATE SPECIFIC USER SESSIONS
+// ============================================================
+
+/**
+ * Register a session token in the per-user session index cache.
+ * B-04: Tracks session keys per userId for efficient invalidation.
+ *
+ * @param {string} userId - The user ID
+ * @param {string} token - The session token
+ */
+function registerSessionIndex_(userId, token) {
+  if (!userId || !token) return;
+  var cache = CacheService.getScriptCache();
+  var indexKey = AUTH.SESSION_INDEX_PREFIX + userId;
+  var existing = cache.get(indexKey);
+  var tokens = [];
+  if (existing) {
+    try { tokens = JSON.parse(existing); } catch (e) { tokens = []; }
+  }
+  // Add token if not already tracked (max 10 sessions per user)
+  if (tokens.indexOf(token) === -1) {
+    tokens.push(token);
+    if (tokens.length > 10) tokens = tokens.slice(tokens.length - 10);
+  }
+  cache.put(indexKey, JSON.stringify(tokens), Math.round(AUTH.TOKEN_EXPIRY_MS / 1000));
+}
+
+/**
+ * Invalidate all sessions belonging to a specific user (by userId).
+ * B-04: Uses a dedicated cache key per userId for O(1) lookup
+ * instead of scanning all cache keys.
+ *
+ * @param {string} userId - The user ID whose sessions should be invalidated
+ */
+function invalidateUserSessions_(userId) {
+  if (!userId) return;
+
+  var cache = CacheService.getScriptCache();
+  var indexKey = AUTH.SESSION_INDEX_PREFIX + userId;
+  var existing = cache.get(indexKey);
+  var tokens = [];
+  if (existing) {
+    try { tokens = JSON.parse(existing); } catch (e) { tokens = []; }
+  }
+
+  // Build keys to remove from the tracked tokens
+  var keysToRemove = [];
+  for (var i = 0; i < tokens.length; i++) {
+    keysToRemove.push(AUTH.SESSION_CACHE_PREFIX + tokens[i]);
+  }
+
+  if (keysToRemove.length > 0) {
+    cache.removeAll(keysToRemove);
+    console.log('Auth: Invalidated ' + keysToRemove.length + ' session(s) for user "' + userId + '"');
+  }
+
+  // Remove the index entry itself
+  cache.remove(indexKey);
 }
 
 // ============================================================

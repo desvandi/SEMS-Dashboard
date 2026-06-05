@@ -3,6 +3,10 @@
  * ==========================================
  * Handles CRUD operations for device schedules.
  *
+ * SECURITY v1.1.0:
+ *   - User-controlled strings are sanitized before writing to sheets
+ *   - Fixed indentation in lock blocks
+ *
  * Endpoints:
  *   GET  /api/schedules/get    — Get all schedules (ESP32 or Frontend)
  *   POST /api/schedules/update — Create or update a schedule (Frontend)
@@ -158,85 +162,86 @@ function handleSchedulesUpdate_(payload, reqHeaders) {
     try {
       lock.waitLock(TELEMETRY.LOCK_WAIT_MS);
 
-    var ss = getSpreadsheet_();
-    var sheet = ss.getSheetByName(SHEET.SCHEDULES);
+      var ss = getSpreadsheet_();
+      var sheet = ss.getSheetByName(SHEET.SCHEDULES);
 
-    if (!sheet) {
-      return { success: false, error: 'schedules sheet not found', code: 500 };
-    }
+      if (!sheet) {
+        return { success: false, error: 'schedules sheet not found', code: 500 };
+      }
 
-    var data = sheet.getDataRange().getValues();
-    var headers_row = data[0];
+      var data = sheet.getDataRange().getValues();
+      var headers_row = data[0];
 
-    var colId        = headers_row.indexOf('id');
-    var colEnabled   = headers_row.indexOf('enabled');
-    var colTarget    = headers_row.indexOf('target');
-    var colAction    = headers_row.indexOf('action');
-    var colTime      = headers_row.indexOf('time');
-    var colDays      = headers_row.indexOf('days');
-    var colType      = headers_row.indexOf('type');
-    var colDate      = headers_row.indexOf('date');
-    var colCreatedAt = headers_row.indexOf('created_at');
+      var colId        = headers_row.indexOf('id');
+      var colEnabled   = headers_row.indexOf('enabled');
+      var colTarget    = headers_row.indexOf('target');
+      var colAction    = headers_row.indexOf('action');
+      var colTime      = headers_row.indexOf('time');
+      var colDays      = headers_row.indexOf('days');
+      var colType      = headers_row.indexOf('type');
+      var colDate      = headers_row.indexOf('date');
+      var colCreatedAt = headers_row.indexOf('created_at');
 
-    var now = getTimestamp_();
-    var isUpdate = !!payload.id;
-    var scheduleId = isUpdate ? payload.id : generateId_('sch');
+      var now = getTimestamp_();
+      var isUpdate = !!payload.id;
+      var scheduleId = isUpdate ? payload.id : generateId_('sch');
 
-    var scheduleRow = [
-      scheduleId,
-      payload.enabled !== undefined ? payload.enabled : true,
-      payload.target,
-      payload.action,
-      payload.time,
-      safeStringify_(days),
-      payload.type,
-      payload.date || '',
-      now
-    ];
+      // SECURITY: Sanitize user-controlled strings to prevent formula injection
+      var scheduleRow = [
+        sanitizeCellValue_(scheduleId),
+        payload.enabled !== undefined ? payload.enabled : true,
+        sanitizeCellValue_(payload.target),
+        payload.action,
+        sanitizeCellValue_(payload.time),
+        sanitizeCellValue_(safeStringify_(days)),
+        payload.type,
+        sanitizeCellValue_(payload.date || ''),
+        now
+      ];
 
-    if (isUpdate) {
-      var found = false;
-      for (var i = 1; i < data.length; i++) {
-        if (String(data[i][colId]) === String(payload.id)) {
-          var row = i + 1;
-          // Use batch setValues for efficiency
-          var updateValues = [[scheduleRow[1], scheduleRow[2], scheduleRow[3], scheduleRow[4], scheduleRow[5], scheduleRow[6], scheduleRow[7]]];
-          sheet.getRange(row, colEnabled + 1, 1, 7).setValues(updateValues);
-          found = true;
-          break;
+      if (isUpdate) {
+        var found = false;
+        for (var i = 1; i < data.length; i++) {
+          if (String(data[i][colId]) === String(payload.id)) {
+            var row = i + 1;
+            // Use batch setValues for efficiency
+            var updateValues = [[scheduleRow[1], scheduleRow[2], scheduleRow[3], scheduleRow[4], scheduleRow[5], scheduleRow[6], scheduleRow[7]]];
+            sheet.getRange(row, colEnabled + 1, 1, 7).setValues(updateValues);
+            found = true;
+            break;
+          }
         }
+
+        if (!found) {
+          return { success: false, error: 'Schedule not found: ' + payload.id, code: 404 };
+        }
+      } else {
+        sheet.appendRow(scheduleRow);
       }
 
-      if (!found) {
-        return { success: false, error: 'Schedule not found: ' + payload.id, code: 404 };
-      }
-    } else {
-      sheet.appendRow(scheduleRow);
-    }
+      // Invalidate cache
+      CacheService.getScriptCache().remove(CACHE.SCHEDULES_CACHE_KEY);
 
-    // Invalidate cache
-    CacheService.getScriptCache().remove(CACHE.SCHEDULES_CACHE_KEY);
+      var schedule = {
+        id: scheduleId,
+        enabled: scheduleRow[1],
+        target: scheduleRow[2],
+        action: scheduleRow[3],
+        time: scheduleRow[4],
+        days: days,
+        type: scheduleRow[6],
+        date: scheduleRow[7],
+        created_at: scheduleRow[8]
+      };
 
-    var schedule = {
-      id: scheduleId,
-      enabled: scheduleRow[1],
-      target: scheduleRow[2],
-      action: scheduleRow[3],
-      time: scheduleRow[4],
-      days: days,
-      type: scheduleRow[6],
-      date: scheduleRow[7],
-      created_at: scheduleRow[8]
-    };
+      console.log('Schedules: User "' + auth.user.username + '" ' +
+                  (isUpdate ? 'updated' : 'created') + ' schedule "' + scheduleId + '"');
 
-    console.log('Schedules: User "' + auth.user.username + '" ' +
-                (isUpdate ? 'updated' : 'created') + ' schedule "' + scheduleId + '"');
-
-    return {
-      success: true,
-      message: isUpdate ? 'Schedule updated' : 'Schedule created',
-      schedule: schedule
-    };
+      return {
+        success: true,
+        message: isUpdate ? 'Schedule updated' : 'Schedule created',
+        schedule: schedule
+      };
 
     } catch (lockError) {
       return { success: false, error: 'Server busy. Could not acquire lock.', code: 503 };
@@ -276,38 +281,38 @@ function handleSchedulesDelete_(payload, reqHeaders) {
     try {
       lock.waitLock(TELEMETRY.LOCK_WAIT_MS);
 
-    var ss = getSpreadsheet_();
-    var sheet = ss.getSheetByName(SHEET.SCHEDULES);
+      var ss = getSpreadsheet_();
+      var sheet = ss.getSheetByName(SHEET.SCHEDULES);
 
-    if (!sheet) {
-      return { success: false, error: 'schedules sheet not found', code: 500 };
-    }
-
-    var data = sheet.getDataRange().getValues();
-    var headers_row = data[0];
-    var colId = headers_row.indexOf('id');
-
-    var found = false;
-    for (var i = data.length - 1; i >= 1; i--) {
-      if (String(data[i][colId]) === String(payload.id)) {
-        sheet.deleteRow(i + 1);
-        found = true;
-        break;
+      if (!sheet) {
+        return { success: false, error: 'schedules sheet not found', code: 500 };
       }
-    }
 
-    if (!found) {
-      return { success: false, error: 'Schedule not found: ' + payload.id, code: 404 };
-    }
+      var data = sheet.getDataRange().getValues();
+      var headers_row = data[0];
+      var colId = headers_row.indexOf('id');
 
-    CacheService.getScriptCache().remove(CACHE.SCHEDULES_CACHE_KEY);
+      var found = false;
+      for (var i = data.length - 1; i >= 1; i--) {
+        if (String(data[i][colId]) === String(payload.id)) {
+          sheet.deleteRow(i + 1);
+          found = true;
+          break;
+        }
+      }
 
-    console.log('Schedules: User "' + auth.user.username + '" deleted schedule "' + payload.id + '"');
+      if (!found) {
+        return { success: false, error: 'Schedule not found: ' + payload.id, code: 404 };
+      }
 
-    return {
-      success: true,
-      message: 'Schedule deleted: ' + payload.id
-    };
+      CacheService.getScriptCache().remove(CACHE.SCHEDULES_CACHE_KEY);
+
+      console.log('Schedules: User "' + auth.user.username + '" deleted schedule "' + payload.id + '"');
+
+      return {
+        success: true,
+        message: 'Schedule deleted: ' + payload.id
+      };
 
     } catch (lockError) {
       return { success: false, error: 'Server busy. Could not acquire lock.', code: 503 };

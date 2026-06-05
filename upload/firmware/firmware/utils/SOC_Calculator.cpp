@@ -1,6 +1,13 @@
 /**
  * @file SOC_Calculator.cpp
  * @brief SOC Calculator implementation - Coulomb Counting for LiFePO4
+ *
+ * FIX v1.0.2: EEPROM API updated for ESP32 Core 3.x compatibility.
+ *   Replaced: writeUInt32(), writeUInt16(), writeFloat(), readUInt32(), readUInt16(), readFloat()
+ *   With: put(addr, val), get(addr, &val)
+ *
+ * FIX v1.0.2: EEPROM save interval increased from 60s to 300s (5 minutes)
+ *   to reduce EEPROM wear. At 300s intervals, ~500k writes to reach 100k limit.
  */
 
 #include "SOC_Calculator.h"
@@ -93,9 +100,10 @@ void SOC_Calculator::update(float current, float voltage) {
     _previousCurrent = current;
     _data.lastUpdateMs = now;
 
-    // Periodically save to EEPROM (every ~60 seconds)
+    // FIX v1.0.2: Save to EEPROM every 300 seconds (was 60 seconds)
+    // At 300s intervals: ~500k cycles to reach 100k write limit (safe margin)
     static unsigned long lastSave = 0;
-    if (now - lastSave >= 60000) {
+    if (now - lastSave >= 300000UL) {
         lastSave = now;
         saveToEEPROM();
     }
@@ -209,16 +217,22 @@ float SOC_Calculator::clampSOC(float soc) const {
 
 // ============================================================================
 // EEPROM PERSISTENCE
+// FIX v1.0.2: Replaced deprecated EEPROM API with ESP32 Core 3.x compatible API.
+//   Old: writeUInt32(), writeUInt16(), writeFloat(), readUInt32(), readUInt16(), readFloat()
+//   New: put(addr, val), get(addr, &val)
 // ============================================================================
 
 bool SOC_Calculator::saveToEEPROM() {
-    EEPROM.writeUInt32(EEPROM_ADDR_MAGIC, EEPROM_MAGIC);
-    EEPROM.writeUInt16(EEPROM_ADDR_VERSION, EEPROM_VERSION);
-    EEPROM.writeFloat(EEPROM_ADDR_SOC, _data.socPercent);
-    EEPROM.writeFloat(EEPROM_ADDR_CAL_V, _data.lastVoltage);
+    // FIX v1.0.2: Use put() instead of writeUInt32/writeUInt16/writeFloat
+    uint32_t magicVal = EEPROM_MAGIC;
+    uint16_t versionVal = EEPROM_VERSION;
+    EEPROM.put(EEPROM_ADDR_MAGIC, magicVal);
+    EEPROM.put(EEPROM_ADDR_VERSION, versionVal);
+    EEPROM.put(EEPROM_ADDR_SOC, _data.socPercent);
+    EEPROM.put(EEPROM_ADDR_CAL_V, _data.lastVoltage);
 
     // Write the last current as calibration reference
-    EEPROM.writeFloat(EEPROM_ADDR_CAL_I, _data.lastCurrent);
+    EEPROM.put(EEPROM_ADDR_CAL_I, _data.lastCurrent);
 
     if (!EEPROM.commit()) {
         DBG_SAFETY("EEPROM commit failed during SOC save!");
@@ -228,8 +242,11 @@ bool SOC_Calculator::saveToEEPROM() {
 }
 
 bool SOC_Calculator::loadFromEEPROM() {
-    uint32_t magic = EEPROM.readUInt32(EEPROM_ADDR_MAGIC);
-    uint16_t version = EEPROM.readUInt16(EEPROM_ADDR_VERSION);
+    // FIX v1.0.2: Use get() instead of readUInt32/readUInt16/readFloat
+    uint32_t magic = 0;
+    EEPROM.get(EEPROM_ADDR_MAGIC, magic);
+    uint16_t version = 0;
+    EEPROM.get(EEPROM_ADDR_VERSION, version);
 
     // Validate magic number and version
     if (magic != EEPROM_MAGIC || version != EEPROM_VERSION) {
@@ -237,15 +254,17 @@ bool SOC_Calculator::loadFromEEPROM() {
         return false;
     }
 
-    float savedSOC = EEPROM.readFloat(EEPROM_ADDR_SOC);
-    float savedVoltage = EEPROM.readFloat(EEPROM_ADDR_CAL_V);
+    float savedSOC = 0.0f;
+    float savedVoltage = 0.0f;
+    EEPROM.get(EEPROM_ADDR_SOC, savedSOC);
+    EEPROM.get(EEPROM_ADDR_CAL_V, savedVoltage);
 
     // Sanity check on loaded values
     if (savedSOC >= SOC_MIN_PERCENT && savedSOC <= SOC_MAX_PERCENT &&
         savedVoltage >= BATTERY_EMPTY_V && savedVoltage <= BATTERY_FULL_V + 1.0f) {
         _data.socPercent = savedSOC;
         _data.lastVoltage = savedVoltage;
-        _data.lastCurrent = EEPROM.readFloat(EEPROM_ADDR_CAL_I);
+        EEPROM.get(EEPROM_ADDR_CAL_I, _data.lastCurrent);
         return true;
     }
 

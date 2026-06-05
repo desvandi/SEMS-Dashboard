@@ -90,10 +90,11 @@ var SCHEDULES_HEADERS = [
 
 // ============================================================
 // COLUMN HEADERS — users
+// SECURITY v1.1.0: Added 'must_change_password' column
 // ============================================================
 
 var USERS_HEADERS = [
-  'id', 'username', 'password_hash', 'role', 'created_at', 'active'
+  'id', 'username', 'password_hash', 'role', 'created_at', 'active', 'must_change_password'
 ];
 
 // ============================================================
@@ -188,17 +189,35 @@ var ROLE_PERMISSIONS = {
 
 // ============================================================
 // AUTHENTICATION CONSTANTS
+// SECURITY v1.1.0: Added HASH_ROUNDS and MAX_SESSION_LIFETIME_MS
 // ============================================================
 
 var AUTH = {
-  TOKEN_EXPIRY_MS:           24 * 60 * 60 * 1000,  // 24 hours
+  TOKEN_EXPIRY_MS:           6 * 60 * 60 * 1000,   // 6 hours — matches CacheService max TTL (21600s)
+  MAX_SESSION_LIFETIME_MS:    24 * 60 * 60 * 1000,  // 24 hours hard limit (rejects stale sessions)
   SESSION_CACHE_PREFIX:      'sems_session_',
+  SESSION_INDEX_PREFIX:      'sems_sessidx_',      // B-04: per-user session index cache key
   DEVICE_TOKEN_CACHE_KEY:    'sems_device_token',
-  TOKEN_LENGTH:              64
+  TOKEN_LENGTH:              64,
+  HASH_ROUNDS:               1000   // PBKDF2-like iterations for password hashing
 };
 
 /** Default admin password — change immediately after initial setup */
 var DEFAULT_ADMIN_PASSWORD = 'changeme_immediately';
+
+// ============================================================
+// SENSITIVE CONFIG KEYS (filtered from GET responses)
+// SECURITY v1.1.0: Keys whose values are masked as "***" in API responses
+// ============================================================
+
+var SENSITIVE_KEYS = [
+  'device_token',
+  'admin_password',
+  'default_admin_password',
+  'secret_key',
+  'api_key',
+  'private_key'
+];
 
 // ============================================================
 // CACHE SETTINGS
@@ -216,7 +235,8 @@ var CACHE = {
   SCHEDULES_CACHE_KEY:   'sems_schedules_all',
   SCHEDULES_CACHE_TTL:   300,   // seconds
   TELEMETRY_DEDUP_KEY:   'sems_last_telemetry_hash',
-  TELEMETRY_DEDUP_TTL:   30     // seconds
+  TELEMETRY_DEDUP_TTL:   30,    // seconds
+  CLEANUP_COUNTER_KEY:   'sems_cleanup_counter'  // Counter for cleanup optimization
 };
 
 // ============================================================
@@ -238,7 +258,9 @@ var EMAIL_CONFIG = {
 var CLEANUP = {
   TELEMETRY_HISTORY_MAX_AGE_DAYS: 30,
   ALARMS_MAX_AGE_DAYS:            90,
-  LOCK_TIMEOUT_MS:                10000  // 10 seconds
+  LOCK_TIMEOUT_MS:                5000,   // 5 seconds (reduced from 10s)
+  MAX_BATCH_ROWS:                 500,    // B-09: max rows deleted per cleanup run
+  RUN_EVERY_N_POSTS:              10      // Run cleanup every Nth telemetry POST
 };
 
 // ============================================================
@@ -328,7 +350,7 @@ var EMAIL_COLORS = {
 // SYSTEM VERSION
 // ============================================================
 
-var SYSTEM_VERSION = '1.0.0';
+var SYSTEM_VERSION = '1.1.0';
 
 // ============================================================
 // HELPER: Generate unique ID
@@ -384,6 +406,33 @@ function safeStringify_(obj, replacer, space) {
   } catch (e) {
     return '{}';
   }
+}
+
+// ============================================================
+// HELPER: Sanitize cell value to prevent formula injection
+// SECURITY v1.1.0: Prevents CSV/Sheets formula injection attacks
+// ============================================================
+
+/**
+ * Sanitize a value before writing it to a Google Sheets cell.
+ * Prefixes strings starting with formula characters (=, +, -, @, \t)
+ * with a single quote (') to force text interpretation in Google Sheets.
+ *
+ * This prevents formula injection attacks where an attacker could inject
+ * malicious formulas (e.g., =CMD(...) in Excel, or =IMPORTXML in Sheets)
+ * via user-controlled data fields.
+ *
+ * @param {*} value - The value to sanitize (any type)
+ * @returns {*} Sanitized value (non-strings are returned as-is)
+ */
+function sanitizeCellValue_(value) {
+  if (typeof value !== 'string') return value;
+  var str = value;
+  // Check if the string starts with a formula character
+  if (str.length > 0 && /^[=+\-@\t\r\n\x00]/.test(str)) {
+    return "'" + str;
+  }
+  return str;
 }
 
 // ============================================================

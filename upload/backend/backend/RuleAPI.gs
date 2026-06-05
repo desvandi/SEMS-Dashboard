@@ -3,6 +3,10 @@
  * =============================================
  * Handles CRUD operations for automation rules.
  *
+ * SECURITY v1.1.0:
+ *   - User-controlled strings are sanitized before writing to sheets
+ *   - Fixed indentation in lock blocks
+ *
  * Endpoints:
  *   GET  /api/rules/get    — Get all automation rules (ESP32 or Frontend)
  *   POST /api/rules/update — Create or update an automation rule (Frontend)
@@ -145,89 +149,91 @@ function handleRulesUpdate_(payload, reqHeaders) {
     try {
       lock.waitLock(TELEMETRY.LOCK_WAIT_MS);
 
-    var ss = getSpreadsheet_();
-    var sheet = ss.getSheetByName(SHEET.AUTOMATION_RULES);
+      var ss = getSpreadsheet_();
+      var sheet = ss.getSheetByName(SHEET.AUTOMATION_RULES);
 
-    if (!sheet) {
-      return { success: false, error: 'automation_rules sheet not found', code: 500 };
-    }
+      if (!sheet) {
+        return { success: false, error: 'automation_rules sheet not found', code: 500 };
+      }
 
-    var data = sheet.getDataRange().getValues();
-    var headers_row = data[0];
+      var data = sheet.getDataRange().getValues();
+      var headers_row = data[0];
 
-    var colId         = headers_row.indexOf('id');
-    var colEnabled    = headers_row.indexOf('enabled');
-    var colTarget     = headers_row.indexOf('target');
-    var colLogic      = headers_row.indexOf('logic');
-    var colConditions = headers_row.indexOf('conditions');
-    var colAction     = headers_row.indexOf('action');
-    var colPriority   = headers_row.indexOf('priority');
-    var colCreatedAt  = headers_row.indexOf('created_at');
-    var colUpdatedAt  = headers_row.indexOf('updated_at');
+      var colId         = headers_row.indexOf('id');
+      var colEnabled    = headers_row.indexOf('enabled');
+      var colTarget     = headers_row.indexOf('target');
+      var colLogic      = headers_row.indexOf('logic');
+      var colConditions = headers_row.indexOf('conditions');
+      var colAction     = headers_row.indexOf('action');
+      var colPriority   = headers_row.indexOf('priority');
+      var colCreatedAt  = headers_row.indexOf('created_at');
+      var colUpdatedAt  = headers_row.indexOf('updated_at');
 
-    var now = getTimestamp_();
-    var isUpdate = !!payload.id;
+      var now = getTimestamp_();
+      var isUpdate = !!payload.id;
 
-    // Build the rule row
-    var ruleId = isUpdate ? payload.id : generateId_('rule');
-    var ruleRow = [
-      ruleId,
-      payload.enabled !== undefined ? payload.enabled : true,
-      payload.target,
-      payload.logic,
-      safeStringify_(conditions),
-      payload.action,
-      payload.priority !== undefined ? parseInt(payload.priority) : 0,
-      now,
-      now
-    ];
+      // Build the rule row
+      var ruleId = isUpdate ? payload.id : generateId_('rule');
 
-    if (isUpdate) {
-      // Find and update existing rule
-      var found = false;
-      for (var i = 1; i < data.length; i++) {
-        if (String(data[i][colId]) === String(payload.id)) {
-          var row = i + 1;
-          // Use batch setValues for efficiency
-          var updateValues = [[ruleRow[1], ruleRow[2], ruleRow[3], ruleRow[4], ruleRow[5], ruleRow[6], data[i][colCreatedAt], now]];
-          sheet.getRange(row, colEnabled + 1, 1, 8).setValues(updateValues);
-          found = true;
-          break;
+      // SECURITY: Sanitize user-controlled strings to prevent formula injection
+      var ruleRow = [
+        sanitizeCellValue_(ruleId),
+        payload.enabled !== undefined ? payload.enabled : true,
+        sanitizeCellValue_(payload.target),
+        payload.logic,
+        sanitizeCellValue_(safeStringify_(conditions)),
+        payload.action,
+        payload.priority !== undefined ? parseInt(payload.priority) : 0,
+        now,
+        now
+      ];
+
+      if (isUpdate) {
+        // Find and update existing rule
+        var found = false;
+        for (var i = 1; i < data.length; i++) {
+          if (String(data[i][colId]) === String(payload.id)) {
+            var row = i + 1;
+            // Use batch setValues for efficiency
+            var updateValues = [[ruleRow[1], ruleRow[2], ruleRow[3], ruleRow[4], ruleRow[5], ruleRow[6], data[i][colCreatedAt], now]];
+            sheet.getRange(row, colEnabled + 1, 1, 8).setValues(updateValues);
+            found = true;
+            break;
+          }
         }
+
+        if (!found) {
+          return { success: false, error: 'Rule not found: ' + payload.id, code: 404 };
+        }
+      } else {
+        // SECURITY: Sanitize all values before appending
+        sheet.appendRow(ruleRow);
       }
 
-      if (!found) {
-        return { success: false, error: 'Rule not found: ' + payload.id, code: 404 };
-      }
-    } else {
-      // Append new rule
-      sheet.appendRow(ruleRow);
-    }
+      // Invalidate cache
+      CacheService.getScriptCache().remove(CACHE.RULES_CACHE_KEY);
 
-    // Invalidate cache
-    CacheService.getScriptCache().remove(CACHE.RULES_CACHE_KEY);
+      // Build response object
+      var rule = {
+        id: ruleId,
+        enabled: ruleRow[1],
+        target: ruleRow[2],
+        logic: ruleRow[3],
+        conditions: conditions,
+        action: ruleRow[5],
+        priority: ruleRow[6],
+        created_at: ruleRow[7],
+        updated_at: now
+      };
 
-    // Build response object
-    var rule = {
-      id: ruleId,
-      enabled: ruleRow[1],
-      target: ruleRow[2],
-      logic: ruleRow[3],
-      conditions: conditions,
-      action: ruleRow[5],
-      priority: ruleRow[6],
-      created_at: ruleRow[7],
-      updated_at: now
-    };
+      console.log('Rules: User "' + auth.user.username + '" ' +
+                  (isUpdate ? 'updated' : 'created') + ' rule "' + ruleId + '"');
 
-    console.log('Rules: User "' + auth.user.username + '" ' +
-                (isUpdate ? 'updated' : 'created') + ' rule "' + ruleId + '"');
-
-    return {
-      success: true,
-      message: isUpdate ? 'Rule updated' : 'Rule created',
-      rule: rule
-    };
+      return {
+        success: true,
+        message: isUpdate ? 'Rule updated' : 'Rule created',
+        rule: rule
+      };
 
     } catch (lockError) {
       return { success: false, error: 'Server busy. Could not acquire lock.', code: 503 };
@@ -267,39 +273,39 @@ function handleRulesDelete_(payload, reqHeaders) {
     try {
       lock.waitLock(TELEMETRY.LOCK_WAIT_MS);
 
-    var ss = getSpreadsheet_();
-    var sheet = ss.getSheetByName(SHEET.AUTOMATION_RULES);
+      var ss = getSpreadsheet_();
+      var sheet = ss.getSheetByName(SHEET.AUTOMATION_RULES);
 
-    if (!sheet) {
-      return { success: false, error: 'automation_rules sheet not found', code: 500 };
-    }
-
-    var data = sheet.getDataRange().getValues();
-    var headers_row = data[0];
-    var colId = headers_row.indexOf('id');
-
-    var found = false;
-    // Delete from bottom to preserve row indices
-    for (var i = data.length - 1; i >= 1; i--) {
-      if (String(data[i][colId]) === String(payload.id)) {
-        sheet.deleteRow(i + 1);
-        found = true;
-        break;
+      if (!sheet) {
+        return { success: false, error: 'automation_rules sheet not found', code: 500 };
       }
-    }
 
-    if (!found) {
-      return { success: false, error: 'Rule not found: ' + payload.id, code: 404 };
-    }
+      var data = sheet.getDataRange().getValues();
+      var headers_row = data[0];
+      var colId = headers_row.indexOf('id');
 
-    CacheService.getScriptCache().remove(CACHE.RULES_CACHE_KEY);
+      var found = false;
+      // Delete from bottom to preserve row indices
+      for (var i = data.length - 1; i >= 1; i--) {
+        if (String(data[i][colId]) === String(payload.id)) {
+          sheet.deleteRow(i + 1);
+          found = true;
+          break;
+        }
+      }
 
-    console.log('Rules: User "' + auth.user.username + '" deleted rule "' + payload.id + '"');
+      if (!found) {
+        return { success: false, error: 'Rule not found: ' + payload.id, code: 404 };
+      }
 
-    return {
-      success: true,
-      message: 'Rule deleted: ' + payload.id
-    };
+      CacheService.getScriptCache().remove(CACHE.RULES_CACHE_KEY);
+
+      console.log('Rules: User "' + auth.user.username + '" deleted rule "' + payload.id + '"');
+
+      return {
+        success: true,
+        message: 'Rule deleted: ' + payload.id
+      };
 
     } catch (lockError) {
       return { success: false, error: 'Server busy. Could not acquire lock.', code: 503 };

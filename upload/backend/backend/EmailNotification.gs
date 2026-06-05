@@ -446,6 +446,15 @@ function getAlarmPlainBody_(alarm) {
  */
 function sendTestEmail_() {
   try {
+    // B-12: Separate rate limit for test emails (max 5 per hour)
+    var cache = CacheService.getScriptCache();
+    var testRlKey = 'sems_test_email_hourly';
+    var testCountStr = cache.get(testRlKey);
+    var testCount = parseInt(testCountStr) || 0;
+    if (testCount >= 5) {
+      return { sent: false, message: 'Test email rate limit reached (max 5/hour). Try again later.' };
+    }
+
     var recipientEmail = getConfigValue_('notification_email');
     if (!recipientEmail) {
       return { sent: false, message: 'No notification email configured. Set notification_email in Settings first.' };
@@ -515,6 +524,10 @@ function sendTestEmail_() {
     });
 
     console.log('Email: Test email sent to ' + recipientEmail);
+
+    // B-12: Increment test email rate limit counter
+    cache.put(testRlKey, String(testCount + 1), 3600); // 1 hour TTL
+
     return { sent: true, message: 'Test email sent to ' + recipientEmail };
 
   } catch (e) {

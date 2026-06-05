@@ -1,6 +1,11 @@
 /**
  * @file RelayEngine.cpp
  * @brief 74HC595 shift register control implementation
+ *
+ * FIX v1.0.2: EEPROM API updated for ESP32 Core 3.x compatibility.
+ *   Replaced: writeUInt32(), writeUInt16(), writeWord(), writeByte(),
+ *             readUInt32(), readWord(), readByte()
+ *   With: put(addr, val), get(addr, &val), read(addr), write(addr, val)
  */
 
 #include "RelayEngine.h"
@@ -27,6 +32,8 @@ RelayEngine::RelayEngine()
 
 void RelayEngine::begin() {
     DBG_RELAY("RelayEngine: Initializing...");
+
+    EEPROM.begin(EEPROM_SIZE);  // FIX v1.0.2: Call begin() before any read/write
 
     // -----------------------------------------------------------------------
     // Configure GPIO pins
@@ -272,43 +279,56 @@ void RelayEngine::getMOSFETArray(int out[NUM_MOSFETS]) const {
 
 // ============================================================================
 // EEPROM PERSISTENCE
+// FIX v1.0.2: Replaced deprecated EEPROM API with ESP32 Core 3.x compatible API.
+//   Old: writeUInt32(), writeUInt16(), writeWord(), writeByte(),
+//        readUInt32(), readWord(), readByte()
+//   New: put(addr, val), get(addr, &val), read(addr), write(addr, val)
 // ============================================================================
 
 bool RelayEngine::saveToEEPROM() {
-    // Write magic and version before relay data
-    EEPROM.writeUInt32(EEPROM_ADDR_MAGIC, EEPROM_MAGIC);
-    EEPROM.writeUInt16(EEPROM_ADDR_VERSION, EEPROM_VERSION);
+    // FIX v1.0.2: Use put() instead of writeUInt32/writeUInt16/writeWord/writeByte
+    uint32_t magicVal = EEPROM_MAGIC;
+    uint16_t versionVal = EEPROM_VERSION;
+    EEPROM.put(EEPROM_ADDR_MAGIC, magicVal);
+    EEPROM.put(EEPROM_ADDR_VERSION, versionVal);
 
-    // Pack relay states into 2 bytes (13 bits used)
-    uint16_t relayBits = 0;
+    // Pack relay states into 4 bytes (uint32_t bitmask)
+    uint32_t relayBits = 0;
     for (int i = 0; i < NUM_RELAYS; i++) {
         if (_state.relays[i]) {
-            relayBits |= (1 << i);
+            relayBits |= (1UL << i);
         }
     }
-    EEPROM.writeWord(EEPROM_ADDR_RELAY, relayBits);
+    EEPROM.put(EEPROM_ADDR_RELAY, relayBits);
 
-    // Save MOSFET PWM values (4 bytes)
+    // Save MOSFET PWM values (4 bytes as uint32_t)
+    uint32_t mosfetBits = 0;
     for (int i = 0; i < NUM_MOSFETS; i++) {
-        EEPROM.writeByte(EEPROM_ADDR_MOSFET + i, _state.mosfetPWM[i]);
+        mosfetBits |= ((uint32_t)_state.mosfetPWM[i] << (i * 8));
     }
+    EEPROM.put(EEPROM_ADDR_MOSFET, mosfetBits);
 
     return EEPROM.commit();
 }
 
 bool RelayEngine::loadFromEEPROM() {
-    uint32_t magic = EEPROM.readUInt32(EEPROM_ADDR_MAGIC);
+    // FIX v1.0.2: Use get() instead of readUInt32/readWord/readByte
+    uint32_t magic = 0;
+    EEPROM.get(EEPROM_ADDR_MAGIC, magic);
     if (magic != EEPROM_MAGIC) return false;
 
     // Load relay states
-    uint16_t relayBits = EEPROM.readWord(EEPROM_ADDR_RELAY);
+    uint32_t relayBits = 0;
+    EEPROM.get(EEPROM_ADDR_RELAY, relayBits);
     for (int i = 0; i < NUM_RELAYS; i++) {
-        _state.relays[i] = (relayBits & (1 << i)) != 0;
+        _state.relays[i] = (relayBits & (1UL << i)) != 0;
     }
 
     // Load MOSFET PWM values
+    uint32_t mosfetBits = 0;
+    EEPROM.get(EEPROM_ADDR_MOSFET, mosfetBits);
     for (int i = 0; i < NUM_MOSFETS; i++) {
-        _state.mosfetPWM[i] = EEPROM.readByte(EEPROM_ADDR_MOSFET + i);
+        _state.mosfetPWM[i] = (mosfetBits >> (i * 8)) & 0xFF;
     }
 
     return true;
