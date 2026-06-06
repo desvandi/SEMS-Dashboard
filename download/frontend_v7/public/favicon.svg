@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Background circle -->
+  <circle cx="32" cy="32" r="30" fill="#0f172a" stroke="#10b981" stroke-width="2"/>
+  
+  <!-- Sun rays -->
+  <circle cx="32" cy="28" r="10" fill="#10b981" opacity="0.9"/>
+  
+  <!-- Rays -->
+  <line x1="32" y1="14" x2="32" y2="10" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="32" y1="42" x2="32" y2="46" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="18" y1="28" x2="14" y2="28" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="46" y1="28" x2="50" y2="28" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="21.5" y1="17.5" x2="18.7" y2="14.7" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="42.5" y1="38.5" x2="45.3" y2="41.3" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="42.5" y1="17.5" x2="45.3" y2="14.7" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="21.5" y1="38.5" x2="18.7" y2="41.3" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+  
+  <!-- Battery icon below sun -->
+  <rect x="24" y="44" width="16" height="10" rx="2" stroke="#06b6d4" stroke-width="1.5" fill="none"/>
+  <rect x="29" y="42" width="6" height="2" rx="1" fill="#06b6d4"/>
+  <rect x="26" y="47" width="8" height="4" rx="1" fill="#06b6d4" opacity="0.7"/>
+  
+  <!-- "S" letter small -->
+  <text x="32" y="32" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#0f172a" text-anchor="middle" dominant-baseline="central">S</text>
+</svg>
