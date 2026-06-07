@@ -178,11 +178,14 @@ async function handleRequest(request: NextRequest, method: string) {
     const data = await response.json();
 
     // P2-CSRF-02: Return new CSRF token in header after successful POST
-    const responseHeaders: HeadersInit = { status: response.ok ? 200 : response.status };
+    const responseHeaders: Record<string, string> = {};
     if (method === 'POST' && newCsrfToken) {
-      (responseHeaders as Record<string, string>)['X-New-CSRF-Token'] = newCsrfToken;
+      responseHeaders['X-New-CSRF-Token'] = newCsrfToken;
     }
-    return NextResponse.json(data, responseHeaders);
+    return NextResponse.json(data, {
+      status: response.ok ? 200 : response.status,
+      headers: responseHeaders,
+    });
   } catch (error) {
     clearTimeout(timeoutId);
     if (error instanceof DOMException && error.name === 'AbortError') {
