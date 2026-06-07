@@ -43,6 +43,15 @@ next-env.d.ts
 
 # macOS artifacts
 __MACOSX/
+.DS_Store
 
 # lock files (prefer npm)
 bun.lock
+
+# non-frontend project folders
+audit3/
+download/
+skills/
+upload/
+Caddyfile
+worklog.md
