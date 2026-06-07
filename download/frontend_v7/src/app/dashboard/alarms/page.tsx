@@ -471,13 +471,13 @@ export default function AlarmsPage() {
                           {/* Actions */}
                           <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
                             {!alarm.acknowledged && (
-                              {/* FE-050 FIX: Pass alarm object directly instead of display index i */}
+                              // FE-050 FIX: Pass alarm object directly instead of display index i.
+                              // Compare by alarm id since ackingIdx is the unfiltered index.
                               <Button
                                 variant="ghost"
                                 size="icon"
                                 className="h-7 w-7 text-primary hover:text-primary hover:bg-primary/10"
                                 onClick={() => handleAck(alarm)}
-                                {/* FE-050 FIX: Compare by alarm id since ackingIdx is the unfiltered index */}
                                 disabled={ackingIdx !== null && alarms[ackingIdx]?.id === alarm.id}
                                 title="Tandai sudah dibaca"
                               >

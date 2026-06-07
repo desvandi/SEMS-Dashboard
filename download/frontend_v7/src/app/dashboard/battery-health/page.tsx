@@ -605,7 +605,7 @@ export default function BatteryHealthPage() {
         )}
 
         {data.length > 0 && (
-          {/* FE-059 FIX: Wrap chart section in Suspense for lazy loading */}
+          // FE-059 FIX: Wrap chart section in Suspense for lazy loading
           <Suspense fallback={<div className="space-y-4">{Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-[300px] rounded-xl" />)}</div>}>
             <BatteryHealthCharts healthScore={healthScore} historyAnalytics={historyAnalytics} />
           </Suspense>
