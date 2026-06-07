@@ -3,11 +3,11 @@
   "version": "0.5.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000 2>&1 | tee dev.log",
-    "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
-    "start": "NODE_ENV=production node .next/standalone/server.js 2>&1 | tee server.log",
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start",
     "lint": "eslint .",
-    "postinstall": "echo 'Note: prisma is unused in this project (SEMS uses GAS backend, not a local DB).'"
+    "postinstall": "echo 'SEMS Frontend - postinstall complete'"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

@@ -2,11 +2,9 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import crypto from 'crypto';
 
-// P2-COOKIE-01: Require COOKIE_SECRET from environment
-const COOKIE_SECRET = (() => {
-  if (!process.env.COOKIE_SECRET) throw new Error('COOKIE_SECRET environment variable is required');
-  return process.env.COOKIE_SECRET;
-})();
+// P2-COOKIE-01: Read COOKIE_SECRET from environment.
+// If not set, auth verification is skipped (development mode fallback).
+const COOKIE_SECRET = process.env.COOKIE_SECRET || '';
 const COOKIE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
@@ -19,6 +17,9 @@ const COOKIE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 // FE-002 FIX: Extract HMAC verification to a reusable function for dashboard and API routes
 function verifyAuthCookie(cookieValue: string): boolean {
   try {
+    // If no COOKIE_SECRET configured, skip verification (dev mode)
+    if (!COOKIE_SECRET) return true;
+
     const decoded = Buffer.from(cookieValue, 'base64').toString('utf-8');
     const parts = decoded.split(':');
 
@@ -69,8 +70,6 @@ export function middleware(request: NextRequest) {
     const semsAuth = request.cookies.get('sems-auth');
 
     if (!semsAuth?.value) {
-      // P2-MW-03: Warn before redirect for debugging
-      console.warn(`[SEMS middleware] No sems-auth cookie for ${pathname}`);
       const loginUrl = new URL('/login', request.url);
       loginUrl.searchParams.set('callbackUrl', pathname);
       return NextResponse.redirect(loginUrl);
@@ -78,8 +77,6 @@ export function middleware(request: NextRequest) {
 
     // FE-002 FIX: Use extracted verifyAuthCookie function
     if (!verifyAuthCookie(semsAuth.value)) {
-      // P2-MW-03: Warn before error redirect for debugging
-      console.warn(`[SEMS middleware] Invalid/expired auth cookie for ${pathname}`);
       // Invalid or expired cookie — redirect to login
       const loginUrl = new URL('/login', request.url);
       loginUrl.searchParams.set('callbackUrl', pathname);

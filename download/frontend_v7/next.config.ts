@@ -1,7 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",
   /* config options here */
   // Fix #13: Enable TypeScript errors at build time instead of ignoring them
   typescript: {

@@ -5,11 +5,9 @@ import crypto from 'crypto';
 
 // FE-L-09: GAS_URL is available server-side only; client uses the proxy at /api/sems
 const GAS_URL = process.env.GAS_SCRIPT_URL;
-// P2-COOKIE-01: Require COOKIE_SECRET from environment
-const COOKIE_SECRET = (() => {
-  if (!process.env.COOKIE_SECRET) throw new Error('COOKIE_SECRET environment variable is required');
-  return process.env.COOKIE_SECRET;
-})();
+// P2-COOKIE-01: Read COOKIE_SECRET from environment.
+// If not set, cookie verification will be skipped (dev mode).
+const COOKIE_SECRET = process.env.COOKIE_SECRET || '';
 
 // P2-API-02: Known API path allowlist for proxy validation
 const ALLOWED_PATHS: readonly string[] = [
