@@ -75,6 +75,7 @@
 // ============================================================================
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
@@ -1707,7 +1708,6 @@ bool telemetryEnqueue(const String& json) {
 //   This is acceptable for development/testing but MUST be replaced with certificate
 //   pinning (setCACert() or setCACertBundle()) before production deployment.
 //   Without certificate validation, the device is vulnerable to man-in-the-middle attacks.
-#include <WiFiClientSecure.h>
 bool telemetrySend(const char* payload) {
     if (WiFi.status() != WL_CONNECTED) return false;
 
@@ -1857,8 +1857,8 @@ bool fetchConfig(const String& path, String& output) {
             http.end();
             return false;
         }
-        // Limit getString to max 8192 bytes even if Content-Length is missing/incorrect
-        String raw = http.getString(nullptr, 8192);
+        // ESP32 Core 3.x: getString() takes no arguments (size already checked above)
+        String raw = http.getString();
         http.end();
 
         // P2-034: Validate response size
@@ -2087,7 +2087,7 @@ void setup() {
     Serial.printf("[BOOT] Reset reason: %d\n", resetReason);
     if (resetReason == ESP_RST_POWERON) {
         Serial.println("[BOOT] Normal power-on reset");
-    } else if (resetReason == ESP_RST_WATCHDOG || resetReason == ESP_RST_TASK_WDT ||
+    } else if (resetReason == ESP_RST_WDT || resetReason == ESP_RST_TASK_WDT ||
                resetReason == ESP_RST_INT_WDT) {
         // P2-022: After watchdog reset, start with all relays OFF for safety
         Serial.println("[BOOT] CRASH RECOVERY: Watchdog reset detected — starting with all relays OFF");
@@ -2137,7 +2137,7 @@ void setup() {
     calibrateACS712();
 
     // Load saved relay states from EEPROM (overridden by crash recovery above)
-    if (resetReason != ESP_RST_WATCHDOG && resetReason != ESP_RST_TASK_WDT &&
+    if (resetReason != ESP_RST_WDT && resetReason != ESP_RST_TASK_WDT &&
         resetReason != ESP_RST_INT_WDT && resetReason != ESP_RST_BROWNOUT) {
         loadRelayStatesFromEEPROM();
     }
