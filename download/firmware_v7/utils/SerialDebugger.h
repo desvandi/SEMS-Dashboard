@@ -11,6 +11,8 @@
 #define SEMS_SERIAL_DEBUGGER_H
 
 #include <Arduino.h>
+#include <esp_task_wdt.h>
+#include <WiFi.h>
 #include "config.h"
 
 /**
@@ -150,5 +152,13 @@ private:
     // Prevent instantiation
     SerialDebugger() = delete;
 };
+
+// ============================================================================
+// Convenience macros for structured debug output
+// ============================================================================
+// DBG_SENSOR - Maps to SerialDebugger::info("SENSOR", ...) for sensor messages
+// DBG_SAFETY - Maps to SerialDebugger::warning("SAFETY", ...) for safety alerts
+#define DBG_SENSOR(fmt, ...)  SerialDebugger::info("SENSOR", fmt, ##__VA_ARGS__)
+#define DBG_SAFETY(fmt, ...)  SerialDebugger::warning("SAFETY", fmt, ##__VA_ARGS__)
 
 #endif // SEMS_SERIAL_DEBUGGER_H

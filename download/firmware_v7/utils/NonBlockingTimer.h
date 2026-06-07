@@ -1,6 +1,8 @@
 #ifndef NON_BLOCKING_TIMER_H
 #define NON_BLOCKING_TIMER_H
 
+#include <Arduino.h>
+
 // ============================================================================
 // NonBlockingTimer - Header-only replacement for delay()
 // Uses millis() for timing, safe for FreeRTOS and watchdog.
