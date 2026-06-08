@@ -285,7 +285,7 @@ function LoginForm() {
 
         <p className="text-center text-xs text-muted-foreground mt-6">
           &copy; {new Date().getFullYear()} PT. Jaya Mandiri Smart Energy
-          <span className="ml-2 opacity-50">v3.0</span>
+          <span className="ml-2 opacity-50">v4.0</span>
         </p>
       </motion.div>
     </div>

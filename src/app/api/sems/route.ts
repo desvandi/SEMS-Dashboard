@@ -62,23 +62,8 @@ async function handleRequest(request: NextRequest, method: string) {
       if (path) clonedBody.path = path;
       if (authToken) clonedBody.token = authToken;
       body = JSON.stringify(clonedBody);
-
-      // CRITICAL FIX: Also put POST body data into URL query params.
-      // GAS Web Apps redirect POST→302→script.googleusercontent.com.
-      // Even with manual redirect following, the POST body may be lost.
-      // Adding to URL params ensures GAS reads data from e.parameter as fallback.
+      // Set path in URL for GAS routing
       if (path) gasUrl.searchParams.set('path', path);
-      for (const [key, value] of Object.entries(clonedBody)) {
-        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-          gasUrl.searchParams.set(key, String(value));
-        }
-      }
-      // For nested objects, stringify them
-      for (const [key, value] of Object.entries(clonedBody)) {
-        if (typeof value === 'object' && value !== null) {
-          gasUrl.searchParams.set(key, JSON.stringify(value));
-        }
-      }
     } else {
       if (path) gasUrl.searchParams.set('path', path);
       for (const [key, value] of searchParams.entries()) {
@@ -108,10 +93,9 @@ async function handleRequest(request: NextRequest, method: string) {
       });
     }
 
-    const fullGasUrl = gasUrl.toString();
-    console.log(`[SEMS API] ${method} → GAS /${path || '(root)'} URL=${fullGasUrl.substring(0, 120)}`);
+    console.log(`[SEMS API] ${method} → GAS /${path || '(root)'}`);
 
-    const response = await gasFetch(fullGasUrl, {
+    const response = await gasFetch(gasUrl.toString(), {
       method,
       headers,
       body,
@@ -120,25 +104,20 @@ async function handleRequest(request: NextRequest, method: string) {
 
     clearTimeout(timeoutId);
 
-    // Read raw response text first for debugging
-    let rawText = '';
-    try {
-      rawText = await response.text();
-    } catch {
-      rawText = '';
-    }
-
-    console.log(`[SEMS API] ${method} /${path || '(root)'} → GAS HTTP ${response.status} body=${rawText.substring(0, 300)}`);
-
     let data;
     try {
-      data = JSON.parse(rawText);
+      data = await response.json();
     } catch {
-      data = { success: false, error: `GAS returned non-JSON (HTTP ${response.status}): ${rawText.substring(0, 200)}` };
+      const rawStatus = response.status;
+      const statusText = response.statusText;
+      data = { success: false, error: `GAS returned non-JSON (HTTP ${rawStatus} ${statusText})` };
     }
 
+    const level = data.success ? 'log' : 'warn';
+    console[level](`[SEMS API] ${method} /${path || '(root)'} → ${response.status}`, JSON.stringify(data).substring(0, 300));
+
     return NextResponse.json(data, {
-      status: response.ok ? 200 : response.status,
+      status: response.ok ? 200 : 502,
     });
   } catch (error) {
     clearTimeout(timeoutId);
@@ -147,6 +126,6 @@ async function handleRequest(request: NextRequest, method: string) {
       return NextResponse.json({ success: false, error: 'Backend request timed out' }, { status: 504 });
     }
     console.error('[SEMS API] Proxy error:', error instanceof Error ? error.message : 'Unknown');
-    return NextResponse.json({ success: false, error: 'Failed to connect to backend service: ' + (error instanceof Error ? error.message : 'Unknown') }, { status: 502 });
+    return NextResponse.json({ success: false, error: 'Failed to connect to backend service' }, { status: 502 });
   }
 }

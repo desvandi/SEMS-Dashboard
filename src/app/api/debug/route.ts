@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { gasFetch } from '@/lib/gas-fetch';
 
-const BUILD_VERSION = 'v3.0-' + new Date().toISOString().slice(0, 10);
+const BUILD_VERSION = 'v4.0-' + new Date().toISOString().slice(0, 10);
 
 /**
  * GET /api/debug — Diagnostic endpoint to test GAS backend connectivity.

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { cookies } from 'next/headers';
+import { gasFetch } from '@/lib/gas-fetch';
 
 const COOKIE_SECRET = process.env.COOKIE_SECRET || '';
 const GAS_URL = process.env.GAS_SCRIPT_URL;
@@ -9,7 +10,6 @@ const GAS_URL = process.env.GAS_SCRIPT_URL;
  * POST /api/auth/set-cookie
  *
  * Verifies the auth token against GAS backend, then sets a signed HttpOnly cookie.
- * Token verification provides sufficient security — CSRF is not needed here.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -27,16 +27,29 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify token with GAS backend
+    // IMPORTANT: Put token in BOTH body and header. GAS 302 redirect strips headers,
+    // so the body is the reliable transport. GAS doPost reads from e.postData.contents.
     console.log('[set-cookie] Verifying token for user:', username);
-    const gasRes = await fetch(`${GAS_URL}?path=api/users/verify`, {
+    const gasRes = await gasFetch(`${GAS_URL}?path=api/users/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Auth-Token': token },
-      body: JSON.stringify({ username }),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Auth-Token': token,
+      },
+      body: JSON.stringify({ username, token }),
     });
 
-    if (!gasRes.ok) {
-      console.warn('[set-cookie] GAS verify failed:', gasRes.status);
-      return NextResponse.json({ success: false, error: 'Token verification failed' }, { status: 401 });
+    let verifyData;
+    try {
+      verifyData = await gasRes.json();
+    } catch {
+      console.warn('[set-cookie] GAS verify returned non-JSON:', gasRes.status);
+      return NextResponse.json({ success: false, error: 'Token verification failed: invalid response from backend' }, { status: 502 });
+    }
+
+    if (!gasRes.ok || !verifyData?.success) {
+      console.warn('[set-cookie] GAS verify failed:', gasRes.status, JSON.stringify(verifyData).substring(0, 200));
+      return NextResponse.json({ success: false, error: verifyData?.error || 'Token verification failed' }, { status: 401 });
     }
 
     // Generate signed cookie
