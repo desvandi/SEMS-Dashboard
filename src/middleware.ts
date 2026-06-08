@@ -100,10 +100,10 @@ export async function middleware(request: NextRequest) {
       if (pathname === '/api/auth/set-cookie') {
         return NextResponse.next();
       }
-      // T3-FE-001: Allow login POST without cookie
+      // T3-FE-001: Allow login POST and change-password without cookie
       if (pathname === '/api/sems') {
         const pathParam = new URL(request.url).searchParams.get('path');
-        if (pathParam === 'api/users/auth') {
+        if (pathParam === 'api/users/auth' || pathParam === 'api/users/change-password') {
           return NextResponse.next();
         }
       }

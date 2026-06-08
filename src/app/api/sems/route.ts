@@ -16,7 +16,7 @@ const ALLOWED_PATHS: readonly string[] = [
   'api/telemetry/latest', 'api/devices', 'api/devices/control', 'api/devices/rename',
   'api/alarms', 'api/alarms/acknowledge', 'api/rules', 'api/rules/save', 'api/rules/delete',
   'api/schedules', 'api/schedules/save', 'api/schedules/delete',
-  'api/users', 'api/users/create', 'api/users/update', 'api/users/auth',
+  'api/users', 'api/users/create', 'api/users/update', 'api/users/auth', 'api/users/change-password',
   'api/config', 'api/config/update', 'api/config/set',
   'api/telemetry/history', 'api/battery-health', 'api/load-shedding', 'api/notifications',
 ];
