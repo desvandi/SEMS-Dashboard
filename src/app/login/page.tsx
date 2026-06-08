@@ -89,14 +89,16 @@ function LoginForm() {
         body: JSON.stringify({ username, password }),
       });
 
+      let data: any;
       if (!res.ok) {
         let detail = `HTTP ${res.status}`;
         try {
-          const errData = await res.json();
-          detail = errData?.error || errData?.message || JSON.stringify(errData);
+          data = await res.json();
+          detail = data?.error || data?.message || JSON.stringify(data);
           console.error('[Login] Auth failed:', res.status, detail);
-        } catch { /* ignore */ }
-        // Show specific error for debugging
+        } catch {
+          console.error('[Login] Auth failed with non-JSON response:', res.status, res.statusText);
+        }
         if (res.status === 500) {
           setError('Backend belum dikonfigurasi. Hubungi administrator.');
         } else if (res.status === 504) {
@@ -104,13 +106,19 @@ function LoginForm() {
         } else if (res.status === 502) {
           setError('Tidak dapat terhubung ke backend. Coba lagi nanti.');
         } else {
-          setError('Login gagal. Periksa username dan password Anda.');
+          setError(`Login gagal: ${detail}`);
         }
         setFailedAttempts(prev => prev + 1);
         return;
       }
 
-      const data = await res.json();
+      try {
+        data = await res.json();
+      } catch {
+        setError('Backend mengembalikan respons tidak valid.');
+        setLoading(false);
+        return;
+      }
 
       if (data.success && data.token && data.user) {
         // Store auth data in localStorage
@@ -119,39 +127,35 @@ function LoginForm() {
         localStorage.setItem('sems_auth_meta', JSON.stringify({ storedAt: Date.now() }));
 
         // Step 2: Set signed auth cookie via /api/auth/set-cookie
-        // Re-read CSRF token AFTER step 1 response set/rotated the cookie
+        // Note: set-cookie route verifies token with GAS backend, no CSRF needed
         try {
-          const csrfAfterLogin = getCsrfToken();
-          const cookieHeaders: Record<string, string> = {
-            'Content-Type': 'application/json',
-          };
-          if (csrfAfterLogin) {
-            cookieHeaders['X-CSRF-Token'] = csrfAfterLogin;
-          }
           const cookieRes = await fetch('/api/auth/set-cookie', {
             method: 'POST',
-            headers: cookieHeaders,
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username: data.user.username, token: data.token }),
           });
           if (!cookieRes.ok) {
+            let cookieErr = `HTTP ${cookieRes.status}`;
             try {
               const errData = await cookieRes.json();
-              console.error('[Login] set-cookie error:', errData);
+              cookieErr = errData?.error || errData?.message || JSON.stringify(errData);
             } catch { /* ignore */ }
-            setError('Gagal membuat sesi. Silakan coba lagi.');
+            console.error('[Login] set-cookie error:', cookieErr);
+            setError(`Gagal membuat sesi: ${cookieErr}`);
             setLoading(false);
             return;
           }
         } catch (err) {
           console.error('[Login] set-cookie exception:', err);
-          setError('Gagal membuat sesi. Silakan coba lagi.');
+          setError('Gagal membuat sesi. Periksa koneksi internet.');
           setLoading(false);
           return;
         }
 
         router.push(callbackUrl);
       } else {
-        setError('Login gagal. Periksa username dan password Anda.');
+        const reason = data?.error || data?.message || 'Data respons tidak valid';
+        setError(`Login gagal: ${reason}`);
         setFailedAttempts(prev => prev + 1);
       }
     } catch (err) {
@@ -200,7 +204,7 @@ function LoginForm() {
                 <motion.div
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: 'auto' }}
-                  className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm"
+                  className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-600 text-sm break-all"
                 >
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   {error}
