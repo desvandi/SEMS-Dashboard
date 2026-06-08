@@ -88,7 +88,7 @@ export async function POST(request: NextRequest) {
       // FE-009 FIX: Use COOKIE_SECURE env var for explicit control instead of NODE_ENV heuristic
       secure: process.env.COOKIE_SECURE !== 'false',
       // P2-COOKIE-03: sameSite: 'strict' for maximum CSRF protection
-      sameSite: 'strict',
+      sameSite: 'lax',
     });
 
     return response;

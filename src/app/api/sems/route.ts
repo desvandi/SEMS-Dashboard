@@ -73,11 +73,23 @@ async function handleRequest(request: NextRequest, method: string) {
   }
 
   // CSRF protection for POST requests (Fix #5)
-  if (method === 'POST') {
+  // Exemption: api/users/auth (login) skips CSRF because the cookie doesn't exist yet on first visit.
+  if (method === 'POST' && path !== 'api/users/auth') {
     const csrfHeader = request.headers.get('X-CSRF-Token');
     const csrfCookie = (await cookies()).get('sems-csrf');
 
-    if (!csrfHeader || !csrfCookie || csrfHeader !== csrfCookie.value) {
+    // P2-CSRF-01: If no CSRF cookie exists, generate one and skip validation for this request.
+    // The client will pick up the new cookie and include the token on the next request.
+    if (!csrfCookie) {
+      const cookieStore = await cookies();
+      const freshToken = crypto.randomBytes(32).toString('hex');
+      cookieStore.set('sems-csrf', freshToken, {
+        path: '/',
+        secure: process.env.COOKIE_SECURE !== 'false',
+        sameSite: 'lax',
+        maxAge: 86400,
+      });
+    } else if (!csrfHeader || csrfHeader !== csrfCookie.value) {
       return NextResponse.json(
         { success: false, error: 'CSRF validation failed' },
         { status: 403 }
@@ -145,14 +157,14 @@ async function handleRequest(request: NextRequest, method: string) {
     const existingCsrf = cookieStore.get('sems-csrf');
     let newCsrfToken: string | null = null;
 
-    if (method === 'POST' && existingCsrf) {
+    if (method === 'POST' && existingCsrf && path !== 'api/users/auth') {
       // P2-CSRF-02: Rotate CSRF token after successful validation
       newCsrfToken = crypto.randomBytes(32).toString('hex');
       cookieStore.set('sems-csrf', newCsrfToken, {
         path: '/',
         // P2-CSRF-01: NOT httpOnly so client-side JS can read it for Double Submit pattern
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
+        secure: process.env.COOKIE_SECURE !== 'false',
+        sameSite: 'lax',
         maxAge: 86400,
       });
     } else if (!existingCsrf) {
@@ -160,8 +172,8 @@ async function handleRequest(request: NextRequest, method: string) {
       cookieStore.set('sems-csrf', csrfToken, {
         path: '/',
         // P2-CSRF-01: NOT httpOnly so client-side JS can read it for Double Submit pattern
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
+        secure: process.env.COOKIE_SECURE !== 'false',
+        sameSite: 'lax',
         maxAge: 86400,
       });
     }
