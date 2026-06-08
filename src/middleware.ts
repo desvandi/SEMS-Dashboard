@@ -91,6 +91,9 @@ export async function middleware(request: NextRequest) {
 
   // P2-MW-01: Also protect API routes with auth cookie check
   if (pathname.startsWith('/api/')) {
+    if (pathname.startsWith('/api/debug')) {
+      return NextResponse.next();
+    }
     if (pathname.startsWith('/api/sems') || pathname.startsWith('/api/auth/set-cookie')) {
       const semsAuth = request.cookies.get('sems-auth');
       // For /api/auth/set-cookie, allow without cookie (it sets it)
