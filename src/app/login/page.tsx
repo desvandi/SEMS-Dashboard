@@ -86,7 +86,13 @@ function LoginForm() {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
 
-      const res = await fetch('/api/sems?path=api/users/change-password', {
+      const params = new URLSearchParams({
+        path: 'api/users/change-password',
+        username,
+        current_password: password,
+        new_password: newPassword,
+      });
+      const res = await fetch(`/api/sems?${params.toString()}`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ username, current_password: password, new_password: newPassword }),

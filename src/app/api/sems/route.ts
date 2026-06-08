@@ -62,8 +62,15 @@ async function handleRequest(request: NextRequest, method: string) {
       if (path) clonedBody.path = path;
       if (authToken) clonedBody.token = authToken;
       body = JSON.stringify(clonedBody);
-      // Set path in URL for GAS routing
+
+      // Forward path and key fields as URL query params for GAS e.parameter access.
+      // GAS Web Apps may read from e.parameter (URL params) instead of e.postData.contents (body).
       if (path) gasUrl.searchParams.set('path', path);
+      for (const [key, value] of Object.entries(clonedBody)) {
+        if (typeof value === 'string' || typeof value === 'number') {
+          gasUrl.searchParams.set(key, String(value));
+        }
+      }
     } else {
       if (path) gasUrl.searchParams.set('path', path);
       for (const [key, value] of searchParams.entries()) {
