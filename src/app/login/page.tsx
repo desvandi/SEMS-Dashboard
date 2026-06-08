@@ -163,7 +163,12 @@ function LoginForm() {
         try {
           data = await res.json();
           detail = data?.error || data?.message || JSON.stringify(data);
-        } catch { /* ignore */ }
+        } catch {
+          try {
+            const text = await res.text();
+            detail = text.substring(0, 200);
+          } catch { /* ignore */ }
+        }
 
         // Detect "change password required" response
         const lowerDetail = (detail || '').toLowerCase();
@@ -173,10 +178,8 @@ function LoginForm() {
           return;
         }
 
-        if (res.status === 500) setError('Backend belum dikonfigurasi. Hubungi administrator.');
-        else if (res.status === 504) setError('Timeout. Server backend terlalu lambat merespon.');
-        else if (res.status === 502) setError('Tidak dapat terhubung ke backend. Coba lagi nanti.');
-        else setError(`Login gagal: ${detail}`);
+        // Always show actual error detail from GAS backend
+        setError(`Login gagal (${res.status}): ${detail}`);
         setFailedAttempts(prev => prev + 1);
         return;
       }
