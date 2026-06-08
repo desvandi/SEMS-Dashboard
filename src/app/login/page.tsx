@@ -92,10 +92,10 @@ function LoginForm() {
         current_password: password,
         new_password: newPassword,
       });
+      // Use GET with URL params because GAS reads from e.parameter
       const res = await fetch(`/api/sems?${params.toString()}`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ username, current_password: password, new_password: newPassword }),
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
       });
 
       let data: any;
