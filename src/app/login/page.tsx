@@ -90,7 +90,22 @@ function LoginForm() {
       });
 
       if (!res.ok) {
-        setError('Login gagal. Periksa username dan password Anda.');
+        let detail = `HTTP ${res.status}`;
+        try {
+          const errData = await res.json();
+          detail = errData?.error || errData?.message || JSON.stringify(errData);
+          console.error('[Login] Auth failed:', res.status, detail);
+        } catch { /* ignore */ }
+        // Show specific error for debugging
+        if (res.status === 500) {
+          setError('Backend belum dikonfigurasi. Hubungi administrator.');
+        } else if (res.status === 504) {
+          setError('Timeout. Server backend terlalu lambat merespon.');
+        } else if (res.status === 502) {
+          setError('Tidak dapat terhubung ke backend. Coba lagi nanti.');
+        } else {
+          setError('Login gagal. Periksa username dan password Anda.');
+        }
         setFailedAttempts(prev => prev + 1);
         return;
       }
