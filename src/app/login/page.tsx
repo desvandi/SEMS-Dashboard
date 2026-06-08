@@ -89,7 +89,7 @@ function LoginForm() {
       const res = await fetch('/api/sems?path=api/users/change-password', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ username, old_password: password, new_password: newPassword }),
+        body: JSON.stringify({ username, current_password: password, new_password: newPassword }),
       });
 
       let data: any;
