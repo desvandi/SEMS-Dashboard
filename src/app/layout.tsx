@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/Providers";
-import { Toaster } from "@/components/ui/toaster";
+import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 import { PWARegister } from "@/components/PWARegister";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 
@@ -62,7 +62,7 @@ export default function RootLayout({
             <PWARegister />
             {children}
           </ErrorBoundary>
-          <Toaster />
+          <SonnerToaster />
         </Providers>
       </body>
     </html>

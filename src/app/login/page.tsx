@@ -1,15 +1,13 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Sun, Eye, EyeOff, Loader2, AlertCircle, ShieldCheck } from 'lucide-react';
-
-const TOKEN_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -18,6 +16,8 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const callbackUrl = searchParams.get('callbackUrl') || '/dashboard';
 
   // Fix #7: Client-side rate limiting
   const [failedAttempts, setFailedAttempts] = useState(0);
@@ -111,27 +111,39 @@ export default function LoginPage() {
         localStorage.setItem('sems_user', JSON.stringify(data.user));
         localStorage.setItem('sems_auth_meta', JSON.stringify({ storedAt: authData.storedAt }));
 
-        // Fix #3: Set signed cookie via new API route (instead of forgeable sems-auth=1)
+        // Fix #3: Set signed cookie via new API route.
+        // Re-read CSRF token AFTER the login POST response set the cookie.
         try {
+          const csrfAfterLogin = getCsrfToken();
+          const cookieHeaders: Record<string, string> = {
+            'Content-Type': 'application/json',
+          };
+          if (csrfAfterLogin) {
+            cookieHeaders['X-CSRF-Token'] = csrfAfterLogin;
+          }
           const cookieRes = await fetch('/api/auth/set-cookie', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: cookieHeaders,
             body: JSON.stringify({ username: data.user.username, token: data.token }),
           });
           if (!cookieRes.ok) {
-            // T3-FE-010: No fallback cookie — show error and stay on login page
-            setError('Gagal membuat sesi. Silakan coba lagi.');
+            let cookieErr = 'Gagal membuat sesi. Silakan coba lagi.';
+            try {
+              const errData = await cookieRes.json();
+              console.error('[Login] set-cookie error:', errData);
+            } catch { /* ignore parse error */ }
+            setError(cookieErr);
             setLoading(false);
             return;
           }
-        } catch {
-          // T3-FE-010: No fallback cookie — show error and stay on login page
+        } catch (err) {
+          console.error('[Login] set-cookie exception:', err);
           setError('Gagal membuat sesi. Silakan coba lagi.');
           setLoading(false);
           return;
         }
 
-        router.push('/dashboard');
+        router.push(callbackUrl);
       } else {
         // P2-LEAK-01: Show generic error message instead of raw backend error
         setError('Login gagal. Periksa username dan password Anda.');
