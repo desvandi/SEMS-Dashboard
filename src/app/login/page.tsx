@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { Suspense, useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Button } from '@/components/ui/button';
@@ -10,6 +10,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Sun, Eye, EyeOff, Loader2, AlertCircle, ShieldCheck } from 'lucide-react';
 
 export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      </div>
+    }>
+      <LoginForm />
+    </Suspense>
+  );
+}
+
+function LoginForm() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -19,7 +31,7 @@ export default function LoginPage() {
   const searchParams = useSearchParams();
   const callbackUrl = searchParams.get('callbackUrl') || '/dashboard';
 
-  // Fix #7: Client-side rate limiting
+  // Client-side rate limiting
   const [failedAttempts, setFailedAttempts] = useState(0);
   const [cooldownRemaining, setCooldownRemaining] = useState(0);
   const cooldownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -42,7 +54,7 @@ export default function LoginPage() {
     };
   }, [cooldownRemaining]);
 
-  // Read CSRF token from cookie for POST requests (Fix #5)
+  // Read CSRF token from cookie for POST requests
   const getCsrfToken = useCallback((): string | null => {
     const match = document.cookie.match(/(?:^|;\s*)sems-csrf=([^;]*)/);
     return match ? decodeURIComponent(match[1]) : null;
@@ -52,7 +64,6 @@ export default function LoginPage() {
     e.preventDefault();
     setError('');
 
-    // Fix #7: Rate limiting check
     if (cooldownRemaining > 0) return;
     if (failedAttempts >= 5) {
       setCooldownRemaining(5);
@@ -63,9 +74,7 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      // Login through the /api/sems proxy — the SAME path used by device
-      // control, automation rules, telemetry, etc. (all proven working).
-      // No NextAuth involved — direct client → proxy → GAS → token.
+      // Step 1: Authenticate via /api/sems proxy → GAS backend
       const csrfToken = getCsrfToken();
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -81,15 +90,7 @@ export default function LoginPage() {
       });
 
       if (!res.ok) {
-        let detail = '';
-        try {
-          const errData = await res.json();
-          detail = errData?.error || errData?.message || JSON.stringify(errData);
-        } catch {
-          detail = `HTTP ${res.status} ${res.statusText}`;
-        }
-        setError(`Login gagal. Periksa username dan password Anda.`);
-        // Fix #7: Track failed attempt
+        setError('Login gagal. Periksa username dan password Anda.');
         setFailedAttempts(prev => prev + 1);
         return;
       }
@@ -97,22 +98,13 @@ export default function LoginPage() {
       const data = await res.json();
 
       if (data.success && data.token && data.user) {
-        // FE-003 FIX: XSS RISK — Storing token in localStorage is vulnerable to XSS attacks.
-        // If any third-party script or injected code gains access to the page, it can read
-        // localStorage and exfiltrate the token. TODO: Migrate to HttpOnly-only cookie flow
-        // where the token is never exposed to client-side JavaScript.
-        // Fix #2: Store token with expiry timestamp in localStorage
-        const authData = {
-          token: data.token,
-          user: data.user,
-          storedAt: Date.now(),
-        };
+        // Store auth data in localStorage
         localStorage.setItem('sems_token', data.token);
         localStorage.setItem('sems_user', JSON.stringify(data.user));
-        localStorage.setItem('sems_auth_meta', JSON.stringify({ storedAt: authData.storedAt }));
+        localStorage.setItem('sems_auth_meta', JSON.stringify({ storedAt: Date.now() }));
 
-        // Fix #3: Set signed cookie via new API route.
-        // Re-read CSRF token AFTER the login POST response set the cookie.
+        // Step 2: Set signed auth cookie via /api/auth/set-cookie
+        // Re-read CSRF token AFTER step 1 response set/rotated the cookie
         try {
           const csrfAfterLogin = getCsrfToken();
           const cookieHeaders: Record<string, string> = {
@@ -127,12 +119,11 @@ export default function LoginPage() {
             body: JSON.stringify({ username: data.user.username, token: data.token }),
           });
           if (!cookieRes.ok) {
-            let cookieErr = 'Gagal membuat sesi. Silakan coba lagi.';
             try {
               const errData = await cookieRes.json();
               console.error('[Login] set-cookie error:', errData);
-            } catch { /* ignore parse error */ }
-            setError(cookieErr);
+            } catch { /* ignore */ }
+            setError('Gagal membuat sesi. Silakan coba lagi.');
             setLoading(false);
             return;
           }
@@ -145,9 +136,7 @@ export default function LoginPage() {
 
         router.push(callbackUrl);
       } else {
-        // P2-LEAK-01: Show generic error message instead of raw backend error
         setError('Login gagal. Periksa username dan password Anda.');
-        // Fix #7: Track failed attempt
         setFailedAttempts(prev => prev + 1);
       }
     } catch (err) {
@@ -203,7 +192,6 @@ export default function LoginPage() {
                 </motion.div>
               )}
 
-              {/* Fix #7: Cooldown warning */}
               {cooldownRemaining > 0 && (
                 <motion.div
                   initial={{ opacity: 0, height: 0 }}
