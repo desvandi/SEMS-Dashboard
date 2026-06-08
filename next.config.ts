@@ -18,10 +18,9 @@ const nextConfig: NextConfig = {
         headers: [
           {
             key: "Content-Security-Policy",
-            // FE-004 FIX: unsafe-eval is currently required for Next.js runtime.
-            // Plan: Migrate to nonce-based CSP when Next.js supports fully static nonce generation.
-            // FE-008 FIX: Added base-uri 'self' to restrict <base> tag injection.
-            value: "default-src 'self'; base-uri 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'none'; manifest-src 'self'",
+            // FE-004 FIX: unsafe-eval required for Next.js runtime.
+            // Relaxed for Vercel deployment compatibility.
+            value: "default-src 'self'; base-uri 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https:; manifest-src 'self'",
           },
           {
             key: "Strict-Transport-Security",
@@ -29,7 +28,7 @@ const nextConfig: NextConfig = {
           },
           {
             key: "X-Frame-Options",
-            value: "DENY",
+            value: "SAMEORIGIN",
           },
           {
             key: "X-Content-Type-Options",
