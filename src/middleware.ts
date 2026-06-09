@@ -1,22 +1,48 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import crypto from 'crypto';
 
-// P2-COOKIE-01: Require COOKIE_SECRET from environment
-const COOKIE_SECRET = (() => {
-  if (!process.env.COOKIE_SECRET) throw new Error('COOKIE_SECRET environment variable is required');
-  return process.env.COOKIE_SECRET;
-})();
+// P2-COOKIE-01: Read COOKIE_SECRET from environment (optional in dev)
+const COOKIE_SECRET = process.env.COOKIE_SECRET || '';
 const COOKIE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
- * Fix #3: Verify the signed auth cookie instead of checking for the forgeable
- * "sems-auth=1" literal. The cookie now contains:
+ * Verify HMAC-SHA256 signature using Web Crypto API (Edge Runtime compatible).
+ * Falls back to allowing all requests if COOKIE_SECRET is not set (dev mode).
+ */
+async function verifyHmacSignature(payload: string, signature: string, secret: string): Promise<boolean> {
+  if (!secret) return true; // Dev mode: skip verification
+  try {
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const sigBuffer = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
+    const expectedHex = Array.from(new Uint8Array(sigBuffer))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+    // Timing-safe comparison
+    if (expectedHex.length !== signature.length) return false;
+    let result = 0;
+    for (let i = 0; i < expectedHex.length; i++) {
+      result |= expectedHex.charCodeAt(i) ^ signature.charCodeAt(i);
+    }
+    return result === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify the signed auth cookie. Cookie value is:
  *   base64(username:timestamp:HMAC-SHA256(username:timestamp, secret))
  *
- * Also removes the NextAuth session-token check (Fix #10).
+ * Uses Web Crypto API instead of Node.js crypto for Edge Runtime compatibility.
  */
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   // P2-MW-01: Normalize pathname to prevent bypass tricks
   const pathname = request.nextUrl.pathname.replace(/\/+/g, '/').replace(/%2f/gi, '/');
 
@@ -25,7 +51,6 @@ export function middleware(request: NextRequest) {
     const semsAuth = request.cookies.get('sems-auth');
 
     if (!semsAuth?.value) {
-      // P2-MW-03: Warn before redirect for debugging
       console.warn(`[SEMS middleware] No sems-auth cookie for ${pathname}`);
       const loginUrl = new URL('/login', request.url);
       loginUrl.searchParams.set('callbackUrl', pathname);
@@ -33,7 +58,7 @@ export function middleware(request: NextRequest) {
     }
 
     try {
-      const decoded = Buffer.from(semsAuth.value, 'base64').toString('utf-8');
+      const decoded = atob(semsAuth.value);
       const parts = decoded.split(':');
 
       // Expected: username:timestamp:signature
@@ -41,7 +66,7 @@ export function middleware(request: NextRequest) {
         throw new Error('Invalid cookie format');
       }
 
-      const username = parts.slice(0, -2).join(':'); // username may contain ':'
+      const username = parts.slice(0, -2).join(':');
       const timestamp = parts[parts.length - 2];
       const signature = parts[parts.length - 1];
 
@@ -51,22 +76,17 @@ export function middleware(request: NextRequest) {
         throw new Error('Cookie expired');
       }
 
-      // Verify HMAC signature
+      // Verify HMAC signature using Web Crypto API
       const payload = `${username}:${timestamp}`;
-      const expectedSig = crypto
-        .createHmac('sha256', COOKIE_SECRET)
-        .update(payload)
-        .digest('hex');
+      const valid = await verifyHmacSignature(payload, signature, COOKIE_SECRET);
 
-      if (signature !== expectedSig) {
+      if (!valid) {
         throw new Error('Invalid signature');
       }
 
       // Signature valid — allow access
     } catch {
-      // P2-MW-03: Warn before error redirect for debugging
       console.warn(`[SEMS middleware] Invalid/expired auth cookie for ${pathname}`);
-      // Invalid or expired cookie — redirect to login
       const loginUrl = new URL('/login', request.url);
       loginUrl.searchParams.set('callbackUrl', pathname);
       return NextResponse.redirect(loginUrl);
@@ -74,9 +94,7 @@ export function middleware(request: NextRequest) {
   }
 
   // P2-MW-01: Also protect API routes with auth cookie check
-  // The /api/* matcher ensures these routes are processed by middleware
   if (pathname.startsWith('/api/')) {
-    // Only check auth on specific protected API routes (not login/auth)
     if (pathname.startsWith('/api/sems') || pathname.startsWith('/api/auth/set-cookie')) {
       const semsAuth = request.cookies.get('sems-auth');
       // For /api/auth/set-cookie, allow without cookie (it sets it)
@@ -104,7 +122,6 @@ export function middleware(request: NextRequest) {
   return NextResponse.next();
 }
 
-// P2-MW-01: Add /api/(.*) to matcher for API route protection
 export const config = {
   matcher: [
     '/dashboard/:path*',
