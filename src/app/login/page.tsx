@@ -1,44 +1,41 @@
 'use client';
 
-import { Suspense, useState, useEffect, useRef, useCallback } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Sun, Eye, EyeOff, Loader2, AlertCircle, ShieldCheck, KeyRound, ArrowLeft } from 'lucide-react';
+import { Sun, Eye, EyeOff, Loader2, AlertCircle, ShieldCheck, KeyRound, ArrowLeft, CheckCircle2 } from 'lucide-react';
+
+const TOKEN_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+type LoginStep = 'login' | 'change-password' | 'success';
 
 export default function LoginPage() {
-  return (
-    <Suspense fallback={
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <Loader2 className="w-8 h-8 animate-spin text-primary" />
-      </div>
-    }>
-      <LoginForm />
-    </Suspense>
-  );
-}
-
-function LoginForm() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const callbackUrl = searchParams.get('callbackUrl') || '/dashboard';
 
   // Change password state
-  const [mode, setMode] = useState<'login' | 'change-password'>('login');
+  const [step, setStep] = useState<LoginStep>('login');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [changePasswordLoading, setChangePasswordLoading] = useState(false);
+  const [changePasswordError, setChangePasswordError] = useState('');
+  const [changePasswordSuccess, setChangePasswordSuccess] = useState('');
 
-  // Client-side rate limiting
+  // Store the original password for the change-password verification step
+  const [currentPassword, setCurrentPassword] = useState('');
+
+  // Fix #7: Client-side rate limiting
   const [failedAttempts, setFailedAttempts] = useState(0);
   const [cooldownRemaining, setCooldownRemaining] = useState(0);
   const cooldownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -61,81 +58,28 @@ function LoginForm() {
     };
   }, [cooldownRemaining]);
 
-  // Read CSRF token from cookie for POST requests
+  // Read CSRF token from cookie for POST requests (Fix #5)
   const getCsrfToken = useCallback((): string | null => {
     const match = document.cookie.match(/(?:^|;\s*)sems-csrf=([^;]*)/);
     return match ? decodeURIComponent(match[1]) : null;
   }, []);
 
-  const handleChangePassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-
-    if (newPassword.length < 6) {
-      setError('Password baru minimal 6 karakter.');
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      setError('Konfirmasi password tidak cocok.');
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const csrfToken = getCsrfToken();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
-
-      const params = new URLSearchParams({
-        path: 'api/users/change-password',
-        username,
-        current_password: password,
-        new_password: newPassword,
-      });
-      // Use GET with URL params because GAS reads from e.parameter
-      const res = await fetch(`/api/sems?${params.toString()}`, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      let data: any;
-      try { data = await res.json(); } catch {
-        data = { error: `HTTP ${res.status}` };
-      }
-
-      if (!res.ok || !data.success) {
-        setError(data?.error || 'Gagal mengubah password.');
-        setLoading(false);
-        return;
-      }
-
-      // Password changed successfully — auto-login with new password
-      setPassword(newPassword);
-      setNewPassword('');
-      setConfirmPassword('');
-      setMode('login');
-      setError('');
-      // Auto submit login with new credentials after a brief delay
-      setTimeout(() => {
-        const form = document.querySelector('form') as HTMLFormElement;
-        if (form) form.requestSubmit();
-      }, 300);
-    } catch (err) {
-      setError('Gagal mengubah password. Periksa koneksi internet.');
-    } finally {
-      if (mode === 'change-password') setLoading(false);
-    }
+  // Validate password complexity (matching backend rules)
+  const validatePasswordComplexity = (pwd: string): string | null => {
+    if (pwd.length < 8) return 'Password minimal 8 karakter';
+    if (!/[A-Z]/.test(pwd)) return 'Password harus mengandung huruf besar';
+    if (!/[a-z]/.test(pwd)) return 'Password harus mengandung huruf kecil';
+    if (!/[0-9]/.test(pwd)) return 'Password harus mengandung angka';
+    if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?`~]/.test(pwd)) return 'Password harus mengandung karakter spesial';
+    return null;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setSuccessMsg('');
 
-    if (mode === 'change-password') {
-      await handleChangePassword(e);
-      return;
-    }
-
+    // Fix #7: Rate limiting check
     if (cooldownRemaining > 0) return;
     if (failedAttempts >= 5) {
       setCooldownRemaining(5);
@@ -146,10 +90,15 @@ function LoginForm() {
     setLoading(true);
 
     try {
-      // Step 1: Authenticate via /api/sems proxy → GAS backend
+      // Login through the /api/sems proxy — the SAME path used by device
+      // control, automation rules, telemetry, etc. (all proven working).
       const csrfToken = getCsrfToken();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (csrfToken) {
+        headers['X-CSRF-Token'] = csrfToken;
+      }
 
       const res = await fetch('/api/sems?path=api/users/auth', {
         method: 'POST',
@@ -157,86 +106,33 @@ function LoginForm() {
         body: JSON.stringify({ username, password }),
       });
 
-      let data: any;
       if (!res.ok) {
-        let detail = `HTTP ${res.status}`;
+        let detail = '';
         try {
-          data = await res.json();
-          detail = data?.error || data?.message || JSON.stringify(data);
+          const errData = await res.json();
+          detail = errData?.error || errData?.message || JSON.stringify(errData);
         } catch {
-          try {
-            const text = await res.text();
-            detail = text.substring(0, 200);
-          } catch { /* ignore */ }
+          detail = `HTTP ${res.status} ${res.statusText}`;
         }
-
-        // Detect "change password required" response
-        const lowerDetail = (detail || '').toLowerCase();
-        if (lowerDetail.includes('password must be changed') || lowerDetail.includes('change-password') || lowerDetail.includes('change password')) {
-          setLoading(false);
-          setMode('change-password');
-          return;
-        }
-
-        // Always show actual error detail from GAS backend
-        setError(`Login gagal (${res.status}): ${detail}`);
+        setError('Login gagal. Periksa username dan password Anda.');
         setFailedAttempts(prev => prev + 1);
         return;
       }
 
-      try { data = await res.json(); } catch {
-        setError('Backend mengembalikan respons tidak valid.');
-        setLoading(false);
-        return;
-      }
+      const data = await res.json();
 
-      // Check if backend says password must be changed (with 200 status)
-      if (data.success === false || data.change_password) {
-        const msg = data?.error || data?.message || '';
-        const lowerMsg = msg.toLowerCase();
-        if (lowerMsg.includes('password must be changed') || lowerMsg.includes('change-password') || lowerMsg.includes('change password') || data.change_password) {
-          setLoading(false);
-          setMode('change-password');
-          return;
-        }
-        setError(`Login gagal: ${msg || 'Data respons tidak valid'}`);
-        setFailedAttempts(prev => prev + 1);
+      // Handle must_change_password response
+      if (data.mustChangePassword && !data.success) {
+        setSuccessMsg('Password default berhasil diverifikasi. Silakan buat password baru (minimal 8 karakter).');
+        setStep('change-password');
+        setCurrentPassword(password);
         return;
       }
 
       if (data.success && data.token && data.user) {
-        // Store auth data in localStorage
-        localStorage.setItem('sems_token', data.token);
-        localStorage.setItem('sems_user', JSON.stringify(data.user));
-        localStorage.setItem('sems_auth_meta', JSON.stringify({ storedAt: Date.now() }));
-
-        // Step 2: Set signed auth cookie
-        try {
-          const cookieRes = await fetch('/api/auth/set-cookie', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username: data.user.username, token: data.token }),
-          });
-          if (!cookieRes.ok) {
-            let cookieErr = `HTTP ${cookieRes.status}`;
-            try {
-              const errData = await cookieRes.json();
-              cookieErr = errData?.error || errData?.message || JSON.stringify(errData);
-            } catch { /* ignore */ }
-            setError(`Gagal membuat sesi: ${cookieErr}`);
-            setLoading(false);
-            return;
-          }
-        } catch (err) {
-          setError('Gagal membuat sesi. Periksa koneksi internet.');
-          setLoading(false);
-          return;
-        }
-
-        router.push(callbackUrl);
+        await completeLogin(data.token, data.user);
       } else {
-        const reason = data?.error || data?.message || 'Data respons tidak valid';
-        setError(`Login gagal: ${reason}`);
+        setError('Login gagal. Periksa username dan password Anda.');
         setFailedAttempts(prev => prev + 1);
       }
     } catch (err) {
@@ -249,8 +145,143 @@ function LoginForm() {
     }
   };
 
-  const isLoginDisabled = loading || !username || !password || cooldownRemaining > 0;
-  const isChangePwDisabled = loading || !newPassword || !confirmPassword;
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setChangePasswordError('');
+    setChangePasswordSuccess('');
+
+    // Client-side validation
+    const pwdError = validatePasswordComplexity(newPassword);
+    if (pwdError) {
+      setChangePasswordError(pwdError);
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setChangePasswordError('Konfirmasi password tidak cocok.');
+      return;
+    }
+
+    setChangePasswordLoading(true);
+
+    try {
+      const csrfToken = getCsrfToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (csrfToken) {
+        headers['X-CSRF-Token'] = csrfToken;
+      }
+
+      // Call change-password API — this is a public endpoint on the GAS backend
+      // that authenticates via current_password (not session token) for
+      // must_change_password users
+      const res = await fetch('/api/sems?path=api/users/change-password', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          username: username.trim().toLowerCase(),
+          current_password: currentPassword,
+          new_password: newPassword,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setChangePasswordSuccess('Password berhasil diubah! Mengalihkan ke login...');
+        setStep('success');
+
+        // Auto-login with new password after a brief delay
+        setTimeout(async () => {
+          try {
+            const csrfToken2 = getCsrfToken();
+            const headers2: Record<string, string> = {
+              'Content-Type': 'application/json',
+            };
+            if (csrfToken2) {
+              headers2['X-CSRF-Token'] = csrfToken2;
+            }
+
+            const loginRes = await fetch('/api/sems?path=api/users/auth', {
+              method: 'POST',
+              headers: headers2,
+              body: JSON.stringify({
+                username: username.trim().toLowerCase(),
+                password: newPassword,
+              }),
+            });
+
+            if (loginRes.ok) {
+              const loginData = await loginRes.json();
+              if (loginData.success && loginData.token && loginData.user) {
+                await completeLogin(loginData.token, loginData.user);
+                return;
+              }
+            }
+            // If auto-login fails, redirect to login page with clean state
+            setStep('login');
+            setPassword('');
+            setNewPassword('');
+            setConfirmPassword('');
+            setError('Password berhasil diubah. Silakan login dengan password baru.');
+          } catch {
+            setStep('login');
+            setPassword('');
+            setNewPassword('');
+            setConfirmPassword('');
+          }
+        }, 1500);
+      } else {
+        setChangePasswordError(data.error || 'Gagal mengubah password. Silakan coba lagi.');
+      }
+    } catch (err) {
+      setChangePasswordError('Tidak dapat terhubung ke server. Periksa koneksi internet Anda.');
+    } finally {
+      setChangePasswordLoading(false);
+    }
+  };
+
+  const completeLogin = async (token: string, user: { username: string }) => {
+    // Store token with expiry timestamp in localStorage
+    const authData = {
+      token: token,
+      user: user,
+      storedAt: Date.now(),
+    };
+    localStorage.setItem('sems_token', token);
+    localStorage.setItem('sems_user', JSON.stringify(user));
+    localStorage.setItem('sems_auth_meta', JSON.stringify({ storedAt: authData.storedAt }));
+
+    // Set signed cookie via API route
+    try {
+      const cookieRes = await fetch('/api/auth/set-cookie', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user.username }),
+      });
+      if (!cookieRes.ok) {
+        document.cookie = 'sems-auth=present; path=/; max-age=86400; SameSite=Lax';
+      }
+    } catch {
+      document.cookie = 'sems-auth=present; path=/; max-age=86400; SameSite=Lax';
+    }
+
+    router.push('/dashboard');
+  };
+
+  const handleBackToLogin = () => {
+    setStep('login');
+    setChangePasswordError('');
+    setChangePasswordSuccess('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setError('');
+    setSuccessMsg('');
+  };
+
+  const isLoginButtonDisabled = loading || !username || !password || cooldownRemaining > 0;
+  const isChangePasswordButtonDisabled =
+    changePasswordLoading || !newPassword || !confirmPassword || changePasswordSuccess !== '';
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background px-4 relative overflow-hidden">
@@ -273,18 +304,22 @@ function LoginForm() {
           <p className="text-muted-foreground text-sm mt-1">Smart Energy Management System</p>
         </div>
 
-        <Card className="glass-card border-border/50">
-          <AnimatePresence mode="wait">
-            {mode === 'login' ? (
-              <motion.div
-                key="login"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-              >
+        <AnimatePresence mode="wait">
+          {/* ==================== LOGIN FORM ==================== */}
+          {step === 'login' && (
+            <motion.div
+              key="login"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              transition={{ duration: 0.3 }}
+            >
+              <Card className="glass-card border-border/50">
                 <CardHeader className="space-y-1 pb-4">
                   <CardTitle className="text-xl">Sign In</CardTitle>
-                  <CardDescription>Masukkan kredensial untuk mengakses dashboard</CardDescription>
+                  <CardDescription>
+                    Enter your credentials to access the dashboard
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
                   <form onSubmit={handleSubmit} className="space-y-4">
@@ -292,18 +327,22 @@ function LoginForm() {
                       <motion.div
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
-                        className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-600 text-sm break-all"
+                        className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm"
                       >
-                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <AlertCircle className="w-4 h-4 shrink-0" />
                         {error}
                       </motion.div>
                     )}
 
                     {cooldownRemaining > 0 && (
-                      <div className="flex items-center gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 text-sm">
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        className="flex items-center gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-sm"
+                      >
                         <ShieldCheck className="w-4 h-4 shrink-0" />
-                        Terlalu banyak percobaan gagal. Tunggu {cooldownRemaining} detik.
-                      </div>
+                        Too many failed attempts. Please wait {cooldownRemaining}s.
+                      </motion.div>
                     )}
 
                     <div className="space-y-2">
@@ -311,7 +350,7 @@ function LoginForm() {
                       <Input
                         id="username"
                         type="text"
-                        placeholder="Masukkan username"
+                        placeholder="Enter your username"
                         value={username}
                         onChange={(e) => setUsername(e.target.value)}
                         required
@@ -327,7 +366,7 @@ function LoginForm() {
                         <Input
                           id="password"
                           type={showPassword ? 'text' : 'password'}
-                          placeholder="Masukkan password"
+                          placeholder="Enter your password"
                           value={password}
                           onChange={(e) => setPassword(e.target.value)}
                           required
@@ -339,7 +378,7 @@ function LoginForm() {
                           type="button"
                           onClick={() => setShowPassword(!showPassword)}
                           className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                          tabIndex={0}
+                          tabIndex={-1}
                         >
                           {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                         </button>
@@ -349,26 +388,35 @@ function LoginForm() {
                     <Button
                       type="submit"
                       className="w-full bg-primary hover:bg-primary/90 text-primary-foreground h-11"
-                      disabled={isLoginDisabled}
+                      disabled={isLoginButtonDisabled}
                     >
                       {loading ? (
-                        <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Memverifikasi...</>
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Authenticating...
+                        </>
                       ) : cooldownRemaining > 0 ? (
-                        <>Tunggu {cooldownRemaining} detik...</>
+                        <>Wait {cooldownRemaining}s...</>
                       ) : (
                         'Sign In'
                       )}
                     </Button>
                   </form>
                 </CardContent>
-              </motion.div>
-            ) : (
-              <motion.div
-                key="change-password"
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -20 }}
-              >
+              </Card>
+            </motion.div>
+          )}
+
+          {/* ==================== CHANGE PASSWORD FORM ==================== */}
+          {step === 'change-password' && (
+            <motion.div
+              key="change-password"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              transition={{ duration: 0.3 }}
+            >
+              <Card className="glass-card border-border/50">
                 <CardHeader className="space-y-1 pb-4">
                   <div className="flex items-center gap-2">
                     <KeyRound className="w-5 h-5 text-primary" />
@@ -379,21 +427,42 @@ function LoginForm() {
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <form onSubmit={handleSubmit} className="space-y-4">
-                    {error && (
+                  <form onSubmit={handleChangePassword} className="space-y-4">
+                    {/* Success message from login verification */}
+                    {successMsg && (
                       <motion.div
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
-                        className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-600 text-sm break-all"
+                        className="flex items-start gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-green-400 text-sm"
                       >
-                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                        {error}
+                        <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                        {successMsg}
                       </motion.div>
                     )}
 
-                    <div className="p-3 rounded-lg bg-primary/5 border border-primary/20 text-sm text-primary">
-                      Password default berhasil diverifikasi. Silakan buat password baru (minimal 6 karakter).
-                    </div>
+                    {/* Error from change-password API */}
+                    {changePasswordError && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm"
+                      >
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        {changePasswordError}
+                      </motion.div>
+                    )}
+
+                    {/* Password changed success */}
+                    {changePasswordSuccess && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        className="flex items-start gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-green-400 text-sm"
+                      >
+                        <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                        {changePasswordSuccess}
+                      </motion.div>
+                    )}
 
                     <div className="space-y-2">
                       <Label htmlFor="new-password">Password Baru</Label>
@@ -401,24 +470,44 @@ function LoginForm() {
                         <Input
                           id="new-password"
                           type={showNewPassword ? 'text' : 'password'}
-                          placeholder="Minimal 6 karakter"
+                          placeholder="Minimal 8 karakter"
                           value={newPassword}
                           onChange={(e) => setNewPassword(e.target.value)}
                           required
-                          disabled={loading}
-                          minLength={6}
+                          disabled={changePasswordLoading || !!changePasswordSuccess}
                           className="bg-background/50 border-border/50 focus:border-primary h-11 pr-10"
                           autoComplete="new-password"
+                          minLength={8}
                         />
                         <button
                           type="button"
                           onClick={() => setShowNewPassword(!showNewPassword)}
                           className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                          tabIndex={0}
+                          tabIndex={-1}
                         >
                           {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                         </button>
                       </div>
+                      {/* Password strength hints */}
+                      {newPassword.length > 0 && newPassword.length < 8 && (
+                        <p className="text-xs text-muted-foreground">Minimal 8 karakter</p>
+                      )}
+                      {newPassword.length >= 8 && (
+                        <div className="flex gap-1 flex-wrap">
+                          {[/[A-Z]/, /[a-z]/, /[0-9]/, /[^A-Za-z0-9]/].map((regex, i) => (
+                            <span
+                              key={i}
+                              className={`text-xs px-1.5 py-0.5 rounded ${
+                                regex.test(newPassword)
+                                  ? 'bg-green-500/10 text-green-400'
+                                  : 'bg-red-500/10 text-red-400'
+                              }`}
+                            >
+                              {['A-Z', 'a-z', '0-9', '!@#'][i]}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
                     <div className="space-y-2">
@@ -431,40 +520,52 @@ function LoginForm() {
                           value={confirmPassword}
                           onChange={(e) => setConfirmPassword(e.target.value)}
                           required
-                          disabled={loading}
-                          minLength={6}
-                          className="bg-background/50 border-border/50 focus:border-primary h-11 pr-10"
+                          disabled={changePasswordLoading || !!changePasswordSuccess}
+                          className={`bg-background/50 border-border/50 focus:border-primary h-11 pr-10 ${
+                            confirmPassword && confirmPassword !== newPassword
+                              ? 'border-red-500/50'
+                              : confirmPassword && confirmPassword === newPassword
+                              ? 'border-green-500/50'
+                              : ''
+                          }`}
                           autoComplete="new-password"
+                          minLength={8}
                         />
                         <button
                           type="button"
                           onClick={() => setShowConfirmPassword(!showConfirmPassword)}
                           className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                          tabIndex={0}
+                          tabIndex={-1}
                         >
                           {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                         </button>
                       </div>
+                      {confirmPassword && confirmPassword !== newPassword && (
+                        <p className="text-xs text-red-400">Password tidak cocok</p>
+                      )}
                     </div>
 
                     <div className="flex gap-3">
                       <Button
                         type="button"
                         variant="outline"
-                        className="flex-1 h-11 border-border/50"
-                        disabled={loading}
-                        onClick={() => { setMode('login'); setError(''); }}
+                        onClick={handleBackToLogin}
+                        disabled={changePasswordLoading}
+                        className="flex-1"
                       >
                         <ArrowLeft className="w-4 h-4 mr-2" />
                         Kembali
                       </Button>
                       <Button
                         type="submit"
-                        className="flex-1 bg-primary hover:bg-primary/90 text-primary-foreground h-11"
-                        disabled={isChangePwDisabled}
+                        className="flex-[2] bg-primary hover:bg-primary/90 text-primary-foreground h-11"
+                        disabled={isChangePasswordButtonDisabled}
                       >
-                        {loading ? (
-                          <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Mengubah...</>
+                        {changePasswordLoading ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Menyimpan...
+                          </>
                         ) : (
                           'Ganti Password & Login'
                         )}
@@ -472,14 +573,13 @@ function LoginForm() {
                     </div>
                   </form>
                 </CardContent>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </Card>
+              </Card>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <p className="text-center text-xs text-muted-foreground mt-6">
           &copy; {new Date().getFullYear()} PT. Jaya Mandiri Smart Energy
-          <span className="ml-2 opacity-50">v4.0</span>
         </p>
       </motion.div>
     </div>
