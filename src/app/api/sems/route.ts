@@ -74,15 +74,51 @@ async function handleRequest(request: NextRequest, method: string) {
   }
 
   // CSRF protection for POST requests (Fix #5)
+  // Uses Double Submit Cookie pattern: cookie value must match header value.
+  // If no CSRF cookie exists yet (first request), generate one and allow the
+  // request through — the cookie will be set in the response and subsequent
+  // requests must include the matching header.
+  const cookieStore = await cookies();
+  let newCsrfToken: string | null = null;
+
   if (method === 'POST') {
     const csrfHeader = request.headers.get('X-CSRF-Token');
-    const csrfCookie = (await cookies()).get('sems-csrf');
+    const csrfCookie = cookieStore.get('sems-csrf');
 
-    if (!csrfHeader || !csrfCookie || csrfHeader !== csrfCookie.value) {
+    if (!csrfCookie) {
+      // First POST request — no CSRF cookie yet. Generate and allow.
+      newCsrfToken = crypto.randomBytes(32).toString('hex');
+      cookieStore.set('sems-csrf', newCsrfToken, {
+        path: '/',
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 86400,
+      });
+    } else if (!csrfHeader || csrfHeader !== csrfCookie.value) {
       return NextResponse.json(
         { success: false, error: 'CSRF validation failed' },
         { status: 403 }
       );
+    } else {
+      // Valid CSRF — rotate token for next request
+      newCsrfToken = crypto.randomBytes(32).toString('hex');
+      cookieStore.set('sems-csrf', newCsrfToken, {
+        path: '/',
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 86400,
+      });
+    }
+  } else {
+    // GET request — ensure CSRF cookie exists for future POST requests
+    if (!cookieStore.get('sems-csrf')) {
+      const csrfToken = crypto.randomBytes(32).toString('hex');
+      cookieStore.set('sems-csrf', csrfToken, {
+        path: '/',
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 86400,
+      });
     }
   }
 
@@ -158,33 +194,6 @@ async function handleRequest(request: NextRequest, method: string) {
       // NO: gasUrl.searchParams.set('token', authToken) — removed for security
     }
     headers['Content-Type'] = 'application/json';
-
-    // P2-CSRF-01: Generate and set CSRF token cookie if not present.
-    // P2-CSRF-02: After successful CSRF validation, generate new token.
-    const cookieStore = await cookies();
-    const existingCsrf = cookieStore.get('sems-csrf');
-    let newCsrfToken: string | null = null;
-
-    if (method === 'POST' && existingCsrf) {
-      // P2-CSRF-02: Rotate CSRF token after successful validation
-      newCsrfToken = crypto.randomBytes(32).toString('hex');
-      cookieStore.set('sems-csrf', newCsrfToken, {
-        path: '/',
-        // P2-CSRF-01: NOT httpOnly so client-side JS can read it for Double Submit pattern
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
-        maxAge: 86400,
-      });
-    } else if (!existingCsrf) {
-      const csrfToken = crypto.randomBytes(32).toString('hex');
-      cookieStore.set('sems-csrf', csrfToken, {
-        path: '/',
-        // P2-CSRF-01: NOT httpOnly so client-side JS can read it for Double Submit pattern
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
-        maxAge: 86400,
-      });
-    }
 
     // Use gasFetch to correctly handle GAS 302 redirects for all requests
     const response = await gasFetch(gasUrl.toString(), {
