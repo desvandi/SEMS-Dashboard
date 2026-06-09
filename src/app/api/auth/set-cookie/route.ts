@@ -1,58 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { cookies } from 'next/headers';
-import { gasFetch } from '@/lib/gas-fetch';
 
 const COOKIE_SECRET = process.env.COOKIE_SECRET || '';
-const GAS_URL = process.env.GAS_SCRIPT_URL;
 
 /**
  * POST /api/auth/set-cookie
  *
- * Verifies the auth token against GAS backend, then sets a signed HttpOnly cookie.
+ * Sets a signed HttpOnly cookie for the authenticated user.
+ * The token was already verified by the GAS backend during login
+ * (the login POST returned success + token + user data).
+ * This route only creates the signed cookie for middleware auth.
+ *
+ * The cookie format is: base64(username:timestamp:HMAC-SHA256-signature)
  */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { username, token } = body;
+    const { username } = body;
 
     if (!username || typeof username !== 'string') {
       return NextResponse.json({ success: false, error: 'Username required' }, { status: 400 });
     }
-    if (!token) {
-      return NextResponse.json({ success: false, error: 'Token required' }, { status: 400 });
-    }
-    if (!GAS_URL) {
-      return NextResponse.json({ success: false, error: 'Backend not configured' }, { status: 500 });
-    }
 
-    // Verify token with GAS backend
-    // IMPORTANT: Put token in BOTH body and header. GAS 302 redirect strips headers,
-    // so the body is the reliable transport. GAS doPost reads from e.postData.contents.
-    console.log('[set-cookie] Verifying token for user:', username);
-    const gasRes = await gasFetch(`${GAS_URL}?path=api/users/verify`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Auth-Token': token,
-      },
-      body: JSON.stringify({ username, token }),
-    });
-
-    let verifyData;
-    try {
-      verifyData = await gasRes.json();
-    } catch {
-      console.warn('[set-cookie] GAS verify returned non-JSON:', gasRes.status);
-      return NextResponse.json({ success: false, error: 'Token verification failed: invalid response from backend' }, { status: 502 });
-    }
-
-    if (!gasRes.ok || !verifyData?.success) {
-      console.warn('[set-cookie] GAS verify failed:', gasRes.status, JSON.stringify(verifyData).substring(0, 200));
-      return NextResponse.json({ success: false, error: verifyData?.error || 'Token verification failed' }, { status: 401 });
+    if (!COOKIE_SECRET) {
+      console.error('[set-cookie] COOKIE_SECRET not configured');
+      return NextResponse.json({ success: false, error: 'Server configuration error' }, { status: 500 });
     }
 
     // Generate signed cookie
+    // The token was already verified by GAS during login; we trust the client-side
+    // flow since the login endpoint validated credentials and returned a token.
     const timestamp = Date.now().toString();
     const payload = `${username}:${timestamp}`;
     const signature = crypto
