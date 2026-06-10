@@ -38,7 +38,8 @@ import {
   Activity,
   ChevronDown,
 } from 'lucide-react';
-import { format, subDays, subHours } from 'date-fns';
+import { format, subHours, subDays } from 'date-fns';
+import { downsample } from '@/lib/utils';
 
 // ── Chart Colors ──
 const chartColors = {
@@ -135,21 +136,6 @@ function StatCard({
   );
 }
 
-// ── Downsample data if > 500 points ──
-function downsample(data: TelemetryData[], maxPoints = 500): TelemetryData[] {
-  if (data.length <= maxPoints) return data;
-  const step = Math.ceil(data.length / maxPoints);
-  const result: TelemetryData[] = [];
-  for (let i = 0; i < data.length; i += step) {
-    result.push(data[i]);
-  }
-  // Always include the last point
-  if (result[result.length - 1] !== data[data.length - 1]) {
-    result.push(data[data.length - 1]);
-  }
-  return result;
-}
-
 // ── Presets ──
 const presets = [
   { label: '24 Jam', hours: 24 },
@@ -212,6 +198,10 @@ export default function HistoryPage() {
   const handleCustomRange = () => {
     if (!customFrom || !customTo) {
       toast.error('Pilih tanggal mulai dan akhir');
+      return;
+    }
+    if (new Date(customFrom) >= new Date(customTo)) {
+      toast.error('Tanggal awal harus sebelum tanggal akhir');
       return;
     }
     const from = new Date(customFrom).toISOString();

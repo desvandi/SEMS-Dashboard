@@ -8,6 +8,7 @@ import { PageTransition } from '@/components/layout/PageTransition';
 import { fetchAlarms, acknowledgeAlarm } from '@/lib/api';
 import type { Alarm } from '@/lib/types';
 import { toast } from 'sonner';
+import { getSeverityConfig } from '@/lib/utils';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -31,37 +32,6 @@ type SeverityFilter = 'all' | 'info' | 'warning' | 'critical';
 type StatusFilter = 'all' | 'unacknowledged' | 'acknowledged';
 
 // ---- Helpers ----
-function getSeverityConfig(severity: string) {
-  switch (severity) {
-    case 'critical':
-      return {
-        icon: <AlertCircle className="w-4 h-4" />,
-        color: 'text-red-400',
-        bg: 'bg-red-500/10',
-        border: 'border-red-500/20',
-        badge: 'bg-red-500/15 text-red-400 border-red-500/30',
-        dot: 'bg-red-500',
-      };
-    case 'warning':
-      return {
-        icon: <AlertTriangle className="w-4 h-4" />,
-        color: 'text-amber-400',
-        bg: 'bg-amber-500/10',
-        border: 'border-amber-500/20',
-        badge: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
-        dot: 'bg-amber-500',
-      };
-    default:
-      return {
-        icon: <Info className="w-4 h-4" />,
-        color: 'text-blue-400',
-        bg: 'bg-blue-500/10',
-        border: 'border-blue-500/20',
-        badge: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
-        dot: 'bg-blue-500',
-      };
-  }
-}
 
 function formatTimestamp(ts: string) {
   if (!ts) return '';
@@ -118,7 +88,7 @@ export default function AlarmsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
   // Expanded
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const [expandedIdx, setExpandedIdx] = useState<number | string | null>(null);
 
   // Acknowledging
   const [ackingIdx, setAckingIdx] = useState<number | null>(null);
@@ -418,8 +388,9 @@ export default function AlarmsPage() {
               <div className="max-h-[600px] overflow-y-auto">
                 <AnimatePresence>
                   {displayedAlarms.map((alarm, i) => {
+                    const alarmUid = alarm.id ?? alarm.timestamp;
                     const config = getSeverityConfig(alarm.severity);
-                    const isExpanded = expandedIdx === i;
+                    const isExpanded = expandedIdx === alarmUid;
 
                     return (
                       <motion.div
@@ -433,7 +404,7 @@ export default function AlarmsPage() {
                         {/* Main row */}
                         <div
                           className="flex items-start gap-3 p-4 cursor-pointer"
-                          onClick={() => setExpandedIdx(isExpanded ? null : i)}
+                          onClick={() => setExpandedIdx(isExpanded ? null : alarmUid)}
                         >
                           {/* Severity icon */}
                           <div className={`mt-0.5 shrink-0 ${config.color}`}>

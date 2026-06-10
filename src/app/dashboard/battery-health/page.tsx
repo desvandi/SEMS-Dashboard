@@ -14,22 +14,6 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
-  BarChart,
-  Bar,
-  AreaChart,
-  Area,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-  ReferenceLine,
-  Cell,
-} from 'recharts';
-import {
   HeartPulse,
   Calendar,
   RefreshCw,
@@ -44,6 +28,7 @@ import {
   Lightbulb,
 } from 'lucide-react';
 import { format, subDays, startOfDay } from 'date-fns';
+import { downsample } from '@/lib/utils';
 
 // ── Chart Colors ──
 const colors = {
@@ -161,20 +146,6 @@ function CellStatusBadge({ status }: { status: 'good' | 'warning' | 'danger' }) 
       {c.label}
     </Badge>
   );
-}
-
-// ── Downsample ──
-function downsample(data: TelemetryData[], maxPoints = 500): TelemetryData[] {
-  if (data.length <= maxPoints) return data;
-  const step = Math.ceil(data.length / maxPoints);
-  const result: TelemetryData[] = [];
-  for (let i = 0; i < data.length; i += step) {
-    result.push(data[i]);
-  }
-  if (result[result.length - 1] !== data[data.length - 1]) {
-    result.push(data[data.length - 1]);
-  }
-  return result;
 }
 
 // ── Page Component ──

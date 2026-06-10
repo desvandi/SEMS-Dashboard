@@ -31,6 +31,7 @@ import {
   Gauge,
 } from 'lucide-react';
 import { format, subDays, startOfDay } from 'date-fns';
+import { downsample } from '@/lib/utils';
 
 // Fix #8: Lazy-load chart components (heavy recharts bundle)
 const RechartsSection = lazy(() =>
@@ -103,20 +104,6 @@ function StatCard({
       </div>
     </motion.div>
   );
-}
-
-// ── Downsample ──
-function downsample(data: TelemetryData[], maxPoints = 500): TelemetryData[] {
-  if (data.length <= maxPoints) return data;
-  const step = Math.ceil(data.length / maxPoints);
-  const result: TelemetryData[] = [];
-  for (let i = 0; i < data.length; i += step) {
-    result.push(data[i]);
-  }
-  if (result[result.length - 1] !== data[data.length - 1]) {
-    result.push(data[data.length - 1]);
-  }
-  return result;
 }
 
 // ── Helper: format energy ──

@@ -5,6 +5,7 @@ import { motion } from 'framer-motion';
 import { Header } from '@/components/layout/Header';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { PageTransition } from '@/components/layout/PageTransition';
+import { useSemsAuth } from '@/hooks/useSemsAuth';
 import {
   fetchLatestTelemetry,
   fetchDevices,
@@ -52,6 +53,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { format, subHours, subMinutes, differenceInMinutes } from 'date-fns';
+import { downsample } from '@/lib/utils';
 
 // ── Shedding Constants ──
 const THRESHOLDS = {
@@ -586,8 +588,10 @@ function StatusSummaryCard({
 // ── Manual Override Card ──
 function ManualOverrideCard({
   loading,
+  isAdmin,
 }: {
   loading: boolean;
+  isAdmin: boolean;
 }) {
   const [autoShedding, setAutoShedding] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
@@ -595,7 +599,7 @@ function ManualOverrideCard({
   const handleToggleAuto = async () => {
     setSaving('auto');
     try {
-      const res = await updateConfig({ load_shedding_enabled: autoShedding ? '0' : '1' });
+      const res = await updateConfig({ updates: [{ key: 'load_shedding_enabled', value: autoShedding ? '0' : '1' }] });
       if (res.success) {
         setAutoShedding(!autoShedding);
         toast.success(!autoShedding ? 'Auto Load Shedding diaktifkan' : 'Auto Load Shedding dinonaktifkan');
@@ -612,7 +616,7 @@ function ManualOverrideCard({
   const handleForceRecovery = async () => {
     setSaving('recover');
     try {
-      const res = await updateConfig({ force_recovery: '1' });
+      const res = await updateConfig({ updates: [{ key: 'force_recovery', value: '1' }] });
       if (res.success) {
         toast.success('Semua beban telah dipulihkan');
       } else {
@@ -628,7 +632,7 @@ function ManualOverrideCard({
   const handleForceShed = async () => {
     setSaving('shed');
     try {
-      const res = await updateConfig({ force_shed: '1' });
+      const res = await updateConfig({ updates: [{ key: 'force_shed', value: '1' }] });
       if (res.success) {
         toast.success('Semua beban non-kritis dimatikan');
       } else {
@@ -673,6 +677,7 @@ function ManualOverrideCard({
         </Badge>
       </div>
 
+      {isAdmin ? (
       <div className="space-y-3">
         {/* Auto toggle */}
         <div className="flex items-center justify-between p-3 rounded-lg border border-border/50 bg-background/50">
@@ -721,28 +726,23 @@ function ManualOverrideCard({
           </Button>
         </div>
       </div>
+      ) : (
+        <div className="text-center py-6">
+          <ShieldAlert className="w-8 h-8 text-muted-foreground/40 mx-auto mb-2" />
+          <p className="text-xs text-muted-foreground">Hanya admin dan teknisi yang dapat mengakses kontrol manual.</p>
+        </div>
+      )}
     </motion.div>
   );
-}
-
-// ── Downsample helper ──
-function downsample(data: TelemetryData[], maxPoints = 500): TelemetryData[] {
-  if (data.length <= maxPoints) return data;
-  const step = Math.ceil(data.length / maxPoints);
-  const result: TelemetryData[] = [];
-  for (let i = 0; i < data.length; i += step) {
-    result.push(data[i]);
-  }
-  if (result[result.length - 1] !== data[data.length - 1]) {
-    result.push(data[data.length - 1]);
-  }
-  return result;
 }
 
 // ════════════════════════════════════════════
 // ── Main Page Component ──
 // ════════════════════════════════════════════
 export default function LoadSheddingPage() {
+  const { user: session } = useSemsAuth();
+  const isAdmin = session?.role === 'admin' || session?.role === 'technician';
+
   const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [history, setHistory] = useState<TelemetryData[]>([]);
@@ -848,7 +848,7 @@ export default function LoadSheddingPage() {
             devices={devices}
             loading={loading}
           />
-          <ManualOverrideCard loading={loading} />
+          <ManualOverrideCard loading={loading} isAdmin={isAdmin} />
         </div>
 
         {/* Priority Matrix */}

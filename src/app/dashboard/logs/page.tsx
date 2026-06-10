@@ -8,6 +8,7 @@ import { PageTransition } from '@/components/layout/PageTransition';
 import { fetchAlarms, acknowledgeAlarm } from '@/lib/api';
 import type { Alarm } from '@/lib/types';
 import { toast } from 'sonner';
+import { getSeverityConfig } from '@/lib/utils';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -22,8 +23,6 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  AlertTriangle,
-  Info,
   AlertCircle,
   CheckCircle,
   RefreshCw,
@@ -61,42 +60,6 @@ const eventTypes: Record<string, { label: string; color: string }> = {
 
 type SeverityFilter = 'all' | 'info' | 'warning' | 'critical';
 type StatusFilter = 'all' | 'unacknowledged' | 'acknowledged';
-
-// ---- Helpers ----
-function getSeverityConfig(severity: string) {
-  switch (severity) {
-    case 'critical':
-      return {
-        icon: <AlertCircle className="w-4 h-4" />,
-        color: 'text-red-400',
-        bg: 'bg-red-500/10',
-        border: 'border-red-500/20',
-        badge: 'bg-red-500/15 text-red-400 border-red-500/30',
-        dot: 'bg-red-500',
-        line: 'border-red-500',
-      };
-    case 'warning':
-      return {
-        icon: <AlertTriangle className="w-4 h-4" />,
-        color: 'text-amber-400',
-        bg: 'bg-amber-500/10',
-        border: 'border-amber-500/20',
-        badge: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
-        dot: 'bg-amber-500',
-        line: 'border-amber-500',
-      };
-    default:
-      return {
-        icon: <Info className="w-4 h-4" />,
-        color: 'text-blue-400',
-        bg: 'bg-blue-500/10',
-        border: 'border-blue-500/20',
-        badge: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
-        dot: 'bg-blue-500',
-        line: 'border-blue-500',
-      };
-  }
-}
 
 function formatLogTimestamp(ts: string) {
   if (!ts) return '';

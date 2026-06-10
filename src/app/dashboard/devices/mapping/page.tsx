@@ -7,6 +7,7 @@ import { PageHeader } from '@/components/layout/PageHeader';
 import { PageTransition } from '@/components/layout/PageTransition';
 import { fetchDevices, controlDevice, fetchLatestTelemetry } from '@/lib/api';
 import type { Device, TelemetryData } from '@/lib/types';
+import { useSemsAuth } from '@/hooks/useSemsAuth';
 import { toast } from 'sonner';
 
 import { Badge } from '@/components/ui/badge';
@@ -68,6 +69,7 @@ import {
   Info,
   Gauge,
   Layers,
+  ShieldAlert,
 } from 'lucide-react';
 
 // ── Constants ──
@@ -164,6 +166,10 @@ function getDeviceTypeIcon(type: string): string {
 // ── Main Page Component ──
 // ════════════════════════════════════════════
 export default function DeviceMappingPage() {
+  const { user: session, status } = useSemsAuth();
+  const userRole = session?.role;
+  const isAdmin = userRole === 'admin' || userRole === 'technician';
+
   const [devices, setDevices] = useState<Device[]>([]);
   const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -380,6 +386,40 @@ export default function DeviceMappingPage() {
       handleTurnAll('off');
     }
   };
+
+  // ════════════════════════════════════════
+  // ── Auth guard ──
+  // ════════════════════════════════════════
+  if (status === 'loading') {
+    return (
+      <PageTransition>
+        <div className="min-h-screen flex items-center justify-center">
+          <Loader2 className="w-8 h-8 text-primary animate-spin" />
+        </div>
+      </PageTransition>
+    );
+  }
+
+  if (!isAdmin) {
+    return (
+      <PageTransition>
+        <Header isConnected={true} lastUpdated={null} onRefresh={() => {}} />
+        <div className="flex flex-col items-center justify-center py-32 gap-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="glass-card rounded-2xl p-8 text-center max-w-sm"
+          >
+            <ShieldAlert className="w-16 h-16 text-red-400 mx-auto mb-4" />
+            <h2 className="text-xl font-bold mb-2">Akses Ditolak</h2>
+            <p className="text-muted-foreground text-sm">
+              Halaman ini hanya tersedia untuk admin dan teknisi. Hubungi admin untuk mendapatkan akses.
+            </p>
+          </motion.div>
+        </div>
+      </PageTransition>
+    );
+  }
 
   // ════════════════════════════════════════
   // ── Render ──
